@@ -12,6 +12,7 @@
 - Try `POST` requests before `GET` in `try_https_endpoint()` to bypass default browser-redirect behavior of Chatmail Nginx configuration.
 - Explicitly pass `ih` (IMAP host) and `sh` (SMTP host) parameters in the constructed `dclogin` URL for fallback and manual flows, ensuring compatibility with relays lacking SRV records and standard subdomains.
 - Recreate the account context if the first QR code configuration attempt fails. This ensures the account is in a clean state before attempting fallback configurations (preventing configuration state conflicts).
+- Pin `deltachat-rpc-server` version to `2.51.0` in `pyproject.toml` to match the pinned client version.
 
 ## 0.17.0
 
