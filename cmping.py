@@ -403,40 +403,51 @@ class AccountMaker:
                 
                 # If QR and HTTPS endpoint both failed, ask for manual credentials
                 if not account.get_config("configured_addr"):
-                    print(f"\n✗ Failed to automatically create account for {domain}")
-                    print("Please enter your credentials manually:")
+                    # Check if we're in an interactive environment
+                    import sys
+                    is_interactive = sys.stdin.isatty() and sys.stdout.isatty()
                     
-                    # Get email address
-                    while True:
-                        email = input(f"Enter email address for {domain} (e.g., yourlogin@{domain}): ").strip()
-                        if email and '@' in email:
-                            break
-                        print("Invalid email format. Please try again.")
-                    
-                    # Get password
-                    while True:
-                        password = getpass.getpass(f"Enter password for {email}: ")
-                        if password:
-                            break
-                        print("Password cannot be empty. Please try again.")
-                    
-                    # Configure account with manual credentials
-                    if self.verbose >= 3:
-                        print(f"  Configuring account manually: {email}")
-                    # Create a dclogin URL with the manual credentials
-                    encoded_password = urllib.parse.quote(password, safe="")
-                    dclogin_url = (
-                        f"dclogin:{email}@{domain}/?"
-                        f"p={encoded_password}&v=1&ip=993&sp=465&ic=3&ss=default"
-                    )
-                    try:
-                        account.set_config_from_qr(dclogin_url)
+                    if is_interactive:
+                        print(f"\n✗ Failed to automatically create account for {domain}")
+                        print("Please enter your credentials manually:")
+                        
+                        # Get email address
+                        while True:
+                            email = input(f"Enter email address for {domain} (e.g., yourlogin@{domain}): ").strip()
+                            if email and '@' in email:
+                                break
+                            print("Invalid email format. Please try again.")
+                        
+                        # Get password
+                        while True:
+                            password = getpass.getpass(f"Enter password for {email}: ")
+                            if password:
+                                break
+                            print("Password cannot be empty. Please try again.")
+                        
+                        # Configure account with manual credentials
                         if self.verbose >= 3:
-                            addr = account.get_config("addr")
-                            print(f"  Account configured: {addr}")
-                    except Exception as e3:
-                        print(f"✗ Failed to configure profile with manual credentials: {e3}")
-                        raise
+                            print(f"  Configuring account manually: {email}")
+                        # Create a dclogin URL with the manual credentials
+                        encoded_password = urllib.parse.quote(password, safe="")
+                        dclogin_url = (
+                            f"dclogin:{email}@{domain}/?"
+                            f"p={encoded_password}&v=1&ip=993&sp=465&ic=3&ss=default"
+                        )
+                        try:
+                            account.set_config_from_qr(dclogin_url)
+                            if self.verbose >= 3:
+                                addr = account.get_config("addr")
+                                print(f"  Account configured: {addr}")
+                        except Exception as e3:
+                            print(f"✗ Failed to configure profile with manual credentials: {e3}")
+                            raise
+                    else:
+                        # Not in interactive mode, fail gracefully
+                        print(f"\n✗ Failed to automatically create account for {domain}")
+                        print("  (HTTPS endpoint fallback also failed)")
+                        print(f"✗ Cannot proceed in non-interactive mode - cannot prompt for manual credentials")
+                        raise Exception(f"Account creation failed for {domain}")
                 else:
                     # QR configuration succeeded, but we need to handle the _add_online failure
                     pass
