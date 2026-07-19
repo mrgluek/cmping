@@ -28,6 +28,21 @@ To send from first domain to a second domain and receive from second domain:
 
     cmping chatmail.uk arcanechat.me 
 
+### Custom Chatmail Relays with HTTPS URL Endpoints
+
+For custom chatmail relay servers that support the [mailadm HTTP API](https://github.com/deltachat/mailadm), you can use HTTPS URL endpoints for account creation:
+
+    cmping https://your-relay.com/new_email?t=token1 chat.gluek.info
+
+The `DCACCOUNT:https://...` format allows the relay server to return account setup information as a JSON object:
+
+```json
+{
+    "email": "customlogin@your-relay.com",
+    "password": "securePasswordHere..."
+}
+```
+
 To show help:
 
     cmping -h

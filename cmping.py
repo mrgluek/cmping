@@ -81,29 +81,19 @@ def generate_credentials():
     return username, password
 
 
-def generate_login(length=9):
-    """Generate random login username for domain-based account.
-
-    Args:
-        length: Length of the login username (default 9)
-
-    Returns:
-        str: Random login username
-    """
-    chars = string.ascii_lowercase + string.digits
-    return "".join(random.choices(chars, k=length))
-
-
-def create_qr_url(domain_or_ip, login=None):
+def create_qr_url(domain_or_ip):
     """Create either a dcaccount or dclogin URL based on input type.
 
     Args:
-        domain_or_ip: Either a domain name or an IP address
-        login: Optional custom login/username to request for domain accounts
+        domain_or_ip: Either a domain name, IP address, or HTTPS URL endpoint
 
     Returns:
-        str: Either dcaccount:domain or dclogin:username@ip/?p=password&v=1&ip=993&sp=465&ic=3&ss=default
+        str: Either dcaccount:domain, dclogin:username@ip/?p=..., or dcaccount:https://...
     """
+    # Check if domain_or_ip is an HTTPS URL endpoint (for mailadm-style API)
+    if domain_or_ip.startswith("https://"):
+        return f"dcaccount:{domain_or_ip}"
+    
     if is_ip_address(domain_or_ip):
         # Generate credentials for IP address
         username, password = generate_credentials()
@@ -119,12 +109,8 @@ def create_qr_url(domain_or_ip, login=None):
         )
         return qr_url
     else:
-        # Use dcaccount for domain names
-        if login:
-            encoded_login = urllib.parse.quote(login, safe="")
-            return f"dcaccount:{domain_or_ip}?login={encoded_login}"
-        else:
-            return f"dcaccount:{domain_or_ip}"
+        # Use dcaccount for domain names (server/client generates 9-char login automatically)
+        return f"dcaccount:{domain_or_ip}"
 
 
 def print_progress(message, current=None, total=None, spinner_idx=0, done=False):
@@ -265,16 +251,29 @@ class AccountMaker:
         account.start_io()
         self.online.append(account)
 
-    def get_relay_account(self, domain, login=None):
-        # Try to find an existing account for this domain/IP
+    def get_relay_account(self, domain):
+        # Try to find an existing account for this domain/IP/URL
         for account in self.dc.get_all_accounts():
             addr = account.get_config("configured_addr")
             if addr is not None:
-                # Extract the domain/IP from the configured address
-                addr_domain = addr.split("@")[1] if "@" in addr else None
-                # Also check login part if specified
-                addr_login = addr.split("@")[0] if "@" in addr else None
-                if addr_domain == domain and (login is None or addr_login == login):
+                # Extract the domain/IP/URL from the configured address
+                if "@" in addr:
+                    addr_domain = addr.split("@")[1]
+                else:
+                    # For HTTPS URL endpoints, the address format may vary
+                    addr_domain = domain if "https://" in str(domain) else None
+                
+                # Check if domain matches (for standard domains or HTTPS URLs)
+                is_https_url = "https://" in str(domain)
+                if is_https_url:
+                    # For HTTPS URLs, check if the account was created from a similar URL
+                    qr_config = account.get_config("qr_url")
+                    if qr_config and domain in qr_config:
+                        if account not in self.online:
+                            if self.verbose >= 3:
+                                print(f"  Reusing existing account: {addr}")
+                            break
+                elif addr_domain == domain:
                     if account not in self.online:
                         if self.verbose >= 3:
                             print(f"  Reusing existing account: {addr}")
@@ -283,7 +282,7 @@ class AccountMaker:
             account = self.dc.add_account()
             if self.verbose >= 3:
                 print(f"  Creating new account for domain: {domain}")
-            qr_url = create_qr_url(domain, login=login)
+            qr_url = create_qr_url(domain)
             try:
                 if self.verbose >= 3:
                     print(f"  Configuring account from QR: {domain}")
@@ -321,16 +320,11 @@ def setup_accounts(args, sender_maker, receiver_maker):
     total_profiles = 1 + args.numrecipients
     profiles_created = 0
 
-    # Generate login if custom length is specified
-    login = None
-    if args.login_length != 9:
-        login = generate_login(args.login_length)
-
     # Create sender and receiver accounts with spinner
     print_progress("Setting up profiles", profiles_created, total_profiles, 0)
 
     try:
-        sender = sender_maker.get_relay_account(args.relay1, login=login)
+        sender = sender_maker.get_relay_account(args.relay1)
         profiles_created += 1
         print_progress("Setting up profiles", profiles_created, total_profiles, profiles_created)
     except Exception as e:
@@ -341,7 +335,7 @@ def setup_accounts(args, sender_maker, receiver_maker):
     receivers = []
     for i in range(args.numrecipients):
         try:
-            receiver = receiver_maker.get_relay_account(args.relay2, login=login)
+            receiver = receiver_maker.get_relay_account(args.relay2)
             receivers.append(receiver)
             profiles_created += 1
             print_progress("Setting up profiles", profiles_created, total_profiles, profiles_created)
