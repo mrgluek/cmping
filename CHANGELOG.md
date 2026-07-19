@@ -14,6 +14,11 @@
 - Recreate the account context if the first QR code configuration attempt fails. This ensures the account is in a clean state before attempting fallback configurations (preventing configuration state conflicts).
 - Pin `deltachat-rpc-server` version to `2.51.0` in `pyproject.toml` to match the pinned client version.
 
+### Added
+
+- Add unit test suite in `tests/test_cmping.py` utilizing `unittest.mock` to test key helper functions and the account configuration lifecycle of `cmping.py` offline.
+- Add GitHub Actions CI workflow to automatically run tests via `pytest` on pushes and pull requests to the `main` branch.
+
 ## 0.17.0
 
 ### Features
