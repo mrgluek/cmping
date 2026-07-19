@@ -115,23 +115,24 @@ def create_qr_url(domain_or_ip):
         return f"dcaccount:{domain_or_ip}"
 
 
-def try_https_endpoint(domain, verbose=0):
+def try_https_endpoint(domain_or_url, verbose=0):
     """Try to obtain account from https://domain/new or https://domain/new_email endpoint.
+    Or if domain_or_url is a URL, try to obtain from it directly.
 
     Args:
-        domain: The domain name (e.g., 'chatmail.uk')
+        domain_or_url: The domain name (e.g., 'chatmail.uk') or full HTTPS URL
         verbose: Verbosity level
 
     Returns:
         tuple: (email, password) if successful, None otherwise
     """
-    # Try both /new and /new_email endpoints
-    endpoints = [f"https://{domain}/new", f"https://{domain}/new_email"]
+    if domain_or_url.startswith("https://"):
+        endpoints = [domain_or_url]
+    else:
+        # Try both /new and /new_email endpoints
+        endpoints = [f"https://{domain_or_url}/new", f"https://{domain_or_url}/new_email"]
     
     for endpoint in endpoints:
-        if not is_https_endpoint_available(endpoint):
-            continue
-        
         try:
             # Make a GET request to the endpoint (DeltaChat expects JSON with email and password)
             req = urllib.request.Request(endpoint, method='GET')
@@ -144,24 +145,12 @@ def try_https_endpoint(domain, verbose=0):
                 result = json.loads(data)
                 if 'email' in result and 'password' in result:
                     return result['email'], result['password']
-        except Exception:
+        except Exception as e:
             if verbose >= 3:
-                print(f"  HTTPS endpoint {endpoint} failed")
+                print(f"  HTTPS endpoint {endpoint} failed: {e}")
             continue
     
     return None
-
-
-def is_https_endpoint_available(url):
-    """Check if an HTTPS endpoint is available by making a HEAD request."""
-    try:
-        req = urllib.request.Request(url, method='HEAD')
-        # Add a user agent to avoid being blocked
-        req.add_header('User-Agent', 'cmping/1.0')
-        response = urllib.request.urlopen(req, timeout=5)
-        return True
-    except Exception:
-        return False
 
 
 def prompt_manual_credentials(domain):
@@ -376,27 +365,31 @@ class AccountMaker:
                     addr = account.get_config("addr")
                     print(f"  Account configured: {addr}")
             except Exception as e:
-                # Fallback routine for domain names
-                if is_domain and self.verbose >= 2:
+                # Fallback routine for domain names and HTTPS URLs
+                is_fallback_applicable = not is_ip_address(domain)
+                if is_fallback_applicable and self.verbose >= 2:
                     print(f"\n✗ Failed to configure profile on {domain} via QR: {e}")
                     print("  Trying HTTPS endpoint fallback...")
                 
-                # Try to obtain account from https://domain/new or https://domain/new_email endpoint
-                if is_domain:
+                # Try to obtain account from HTTPS endpoint
+                if is_fallback_applicable:
                     result = try_https_endpoint(domain, self.verbose)
                     if result:
                         email, password = result
                         if self.verbose >= 2:
                             print(f"  Successfully obtained credentials from HTTPS endpoint: {email}")
-                        # Configure account with manual credentials
+                        # Configure account with the obtained credentials
                         try:
-                            account.set_config("configured_addr", email)
-                            # Note: DeltaChat RPC doesn't have a direct set_password method,
-                            # we need to use the dclogin format or QR with credentials
+                            username, email_domain = email.split("@", 1)
+                            encoded_password = urllib.parse.quote(password, safe="")
+                            dclogin_url = (
+                                f"dclogin:{username}@{email_domain}/?"
+                                f"p={encoded_password}&v=1&ip=993&sp=465&ic=3&ss=default"
+                            )
+                            account.set_config_from_qr(dclogin_url)
                         except Exception as e2:
                             if self.verbose >= 3:
                                 print(f"  Failed to configure from HTTPS endpoint result: {e2}")
-                            # Fall through to manual prompt
                     else:
                         if self.verbose >= 2:
                             print(f"  HTTPS endpoint fallback failed for {domain}")
@@ -429,9 +422,10 @@ class AccountMaker:
                         if self.verbose >= 3:
                             print(f"  Configuring account manually: {email}")
                         # Create a dclogin URL with the manual credentials
+                        username, email_domain = email.split("@", 1)
                         encoded_password = urllib.parse.quote(password, safe="")
                         dclogin_url = (
-                            f"dclogin:{email}@{domain}/?"
+                            f"dclogin:{username}@{email_domain}/?"
                             f"p={encoded_password}&v=1&ip=993&sp=465&ic=3&ss=default"
                         )
                         try:

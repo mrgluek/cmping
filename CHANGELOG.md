@@ -1,9 +1,14 @@
 
 # cmping changelog 
 
-## 0.17.1.dev0
+## 0.17.1
 
-(in development)
+### Bug Fixes
+
+- Fix HTTPS account configuration fallback logic to successfully set up credentials fetched from endpoints (e.g., `https://chatmail.tld/new`) via `dclogin` URL scheme.
+- Fix manual credentials registration and HTTPS fallback to correctly extract the username and domain from the email address before constructing `dclogin` URLs, avoiding double-@ syntax issues.
+- Support full URLs in `try_https_endpoint()` (e.g. `https://chatmail.tld/new`) rather than only raw domains.
+- Remove pre-flight `HEAD` check (`is_https_endpoint_available`) to prevent failures on web servers that do not support the `HEAD` HTTP method.
 
 ## 0.17.0
 
