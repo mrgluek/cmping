@@ -133,22 +133,24 @@ def try_https_endpoint(domain_or_url, verbose=0):
         endpoints = [f"https://{domain_or_url}/new", f"https://{domain_or_url}/new_email"]
     
     for endpoint in endpoints:
-        try:
-            # Make a GET request to the endpoint (DeltaChat expects JSON with email and password)
-            req = urllib.request.Request(endpoint, method='GET')
-            # Add a user agent to avoid being blocked
-            req.add_header('User-Agent', 'cmping/1.0')
-            response = urllib.request.urlopen(req, timeout=10)
-            if response.getcode() == 200:
-                data = response.read().decode('utf-8')
-                import json
-                result = json.loads(data)
-                if 'email' in result and 'password' in result:
-                    return result['email'], result['password']
-        except Exception as e:
-            if verbose >= 3:
-                print(f"  HTTPS endpoint {endpoint} failed: {e}")
-            continue
+        # Try POST method first (usually required by chatmail to bypass dcaccount: browser redirect)
+        for method in ['POST', 'GET']:
+            try:
+                # Make a request to the endpoint
+                req = urllib.request.Request(endpoint, method=method)
+                # Add a user agent to avoid being blocked
+                req.add_header('User-Agent', 'cmping/1.0')
+                response = urllib.request.urlopen(req, timeout=10)
+                if response.getcode() == 200:
+                    data = response.read().decode('utf-8')
+                    import json
+                    result = json.loads(data)
+                    if 'email' in result and 'password' in result:
+                        return result['email'], result['password']
+            except Exception as e:
+                if verbose >= 3:
+                    print(f"  HTTPS endpoint {endpoint} ({method}) failed: {e}")
+                continue
     
     return None
 
@@ -378,13 +380,21 @@ class AccountMaker:
                         email, password = result
                         if self.verbose >= 2:
                             print(f"  Successfully obtained credentials from HTTPS endpoint: {email}")
+                        
+                        # Recreate account to prevent configuration conflicts
+                        try:
+                            account.remove()
+                        except Exception:
+                            pass
+                        account = self.dc.add_account()
+
                         # Configure account with the obtained credentials
                         try:
                             username, email_domain = email.split("@", 1)
                             encoded_password = urllib.parse.quote(password, safe="")
                             dclogin_url = (
                                 f"dclogin:{username}@{email_domain}/?"
-                                f"p={encoded_password}&v=1&ip=993&sp=465&ic=3&ss=default"
+                                f"p={encoded_password}&v=1&ih={email_domain}&sh={email_domain}&ip=993&sp=465&ic=3&ss=default"
                             )
                             account.set_config_from_qr(dclogin_url)
                         except Exception as e2:
@@ -418,6 +428,13 @@ class AccountMaker:
                                 break
                             print("Password cannot be empty. Please try again.")
                         
+                        # Recreate account to prevent configuration conflicts
+                        try:
+                            account.remove()
+                        except Exception:
+                            pass
+                        account = self.dc.add_account()
+
                         # Configure account with manual credentials
                         if self.verbose >= 3:
                             print(f"  Configuring account manually: {email}")
@@ -426,7 +443,7 @@ class AccountMaker:
                         encoded_password = urllib.parse.quote(password, safe="")
                         dclogin_url = (
                             f"dclogin:{username}@{email_domain}/?"
-                            f"p={encoded_password}&v=1&ip=993&sp=465&ic=3&ss=default"
+                            f"p={encoded_password}&v=1&ih={email_domain}&sh={email_domain}&ip=993&sp=465&ic=3&ss=default"
                         )
                         try:
                             account.set_config_from_qr(dclogin_url)
