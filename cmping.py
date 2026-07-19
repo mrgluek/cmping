@@ -24,6 +24,7 @@ import contextlib
 import ipaddress
 import os
 import queue
+from queue import Empty
 import random
 import shutil
 import signal
@@ -80,11 +81,25 @@ def generate_credentials():
     return username, password
 
 
-def create_qr_url(domain_or_ip):
+def generate_login(length=9):
+    """Generate random login username for domain-based account.
+
+    Args:
+        length: Length of the login username (default 9)
+
+    Returns:
+        str: Random login username
+    """
+    chars = string.ascii_lowercase + string.digits
+    return "".join(random.choices(chars, k=length))
+
+
+def create_qr_url(domain_or_ip, login=None):
     """Create either a dcaccount or dclogin URL based on input type.
 
     Args:
         domain_or_ip: Either a domain name or an IP address
+        login: Optional custom login/username to request for domain accounts
 
     Returns:
         str: Either dcaccount:domain or dclogin:username@ip/?p=password&v=1&ip=993&sp=465&ic=3&ss=default
@@ -105,7 +120,11 @@ def create_qr_url(domain_or_ip):
         return qr_url
     else:
         # Use dcaccount for domain names
-        return f"dcaccount:{domain_or_ip}"
+        if login:
+            encoded_login = urllib.parse.quote(login, safe="")
+            return f"dcaccount:{domain_or_ip}?login={encoded_login}"
+        else:
+            return f"dcaccount:{domain_or_ip}"
 
 
 def print_progress(message, current=None, total=None, spinner_idx=0, done=False):
@@ -187,6 +206,13 @@ def main():
         action="store_true",
         help="remove all account directories of tested relays to force fresh account creation",
     )
+    parser.add_argument(
+        "-l", "--login-length",
+        dest="login_length",
+        type=int,
+        default=9,
+        help="length of login/username before @server.tld (default 9)",
+    )
     args = parser.parse_args()
     if not args.relay2:
         args.relay2 = args.relay1
@@ -239,14 +265,16 @@ class AccountMaker:
         account.start_io()
         self.online.append(account)
 
-    def get_relay_account(self, domain):
+    def get_relay_account(self, domain, login=None):
         # Try to find an existing account for this domain/IP
         for account in self.dc.get_all_accounts():
             addr = account.get_config("configured_addr")
             if addr is not None:
                 # Extract the domain/IP from the configured address
                 addr_domain = addr.split("@")[1] if "@" in addr else None
-                if addr_domain == domain:
+                # Also check login part if specified
+                addr_login = addr.split("@")[0] if "@" in addr else None
+                if addr_domain == domain and (login is None or addr_login == login):
                     if account not in self.online:
                         if self.verbose >= 3:
                             print(f"  Reusing existing account: {addr}")
@@ -255,7 +283,7 @@ class AccountMaker:
             account = self.dc.add_account()
             if self.verbose >= 3:
                 print(f"  Creating new account for domain: {domain}")
-            qr_url = create_qr_url(domain)
+            qr_url = create_qr_url(domain, login=login)
             try:
                 if self.verbose >= 3:
                     print(f"  Configuring account from QR: {domain}")
@@ -293,11 +321,16 @@ def setup_accounts(args, sender_maker, receiver_maker):
     total_profiles = 1 + args.numrecipients
     profiles_created = 0
 
+    # Generate login if custom length is specified
+    login = None
+    if args.login_length != 9:
+        login = generate_login(args.login_length)
+
     # Create sender and receiver accounts with spinner
     print_progress("Setting up profiles", profiles_created, total_profiles, 0)
 
     try:
-        sender = sender_maker.get_relay_account(args.relay1)
+        sender = sender_maker.get_relay_account(args.relay1, login=login)
         profiles_created += 1
         print_progress("Setting up profiles", profiles_created, total_profiles, profiles_created)
     except Exception as e:
@@ -308,7 +341,7 @@ def setup_accounts(args, sender_maker, receiver_maker):
     receivers = []
     for i in range(args.numrecipients):
         try:
-            receiver = receiver_maker.get_relay_account(args.relay2)
+            receiver = receiver_maker.get_relay_account(args.relay2, login=login)
             receivers.append(receiver)
             profiles_created += 1
             print_progress("Setting up profiles", profiles_created, total_profiles, profiles_created)
@@ -448,7 +481,10 @@ def perform_ping(args):
             relay_dir = base_accounts_dir.joinpath(relay)
             if relay_dir.exists():
                 print(f"# Removing account directory for {relay}: {relay_dir}")
-                shutil.rmtree(relay_dir)
+                try:
+                    shutil.rmtree(relay_dir)
+                except Exception:
+                    pass
     
     # Create per-relay account directories and RPC instances.
     relay_contexts = {}  # {relay: RelayContext}
@@ -458,7 +494,10 @@ def perform_ping(args):
             relay_dir = base_accounts_dir.joinpath(relay)
             print(f"# using accounts_dir for {relay} at: {relay_dir}")
             if relay_dir.exists() and not relay_dir.joinpath("accounts.toml").exists():
-                shutil.rmtree(relay_dir)
+                try:
+                    shutil.rmtree(relay_dir)
+                except Exception:
+                    pass
 
             try:
                 rpc = exit_stack.enter_context(Rpc(accounts_dir=relay_dir))
@@ -732,7 +771,7 @@ class Pinger:
                     # Log all other events at verbose level 3
                     receiver_addr = self.receivers_addrs[receiver_idx]
                     log_event_verbose(event, receiver_addr)
-            except queue.Empty:
+            except Empty:
                 # Timeout occurred, check if we should continue
                 continue
 

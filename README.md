@@ -1,25 +1,62 @@
 # chatmail relay server ping tool
 
-To install use: 
+## Installation in a virtual environment (venv)
 
-    pip install cmping 
+It is recommended to install `cmping` in a Python virtual environment:
 
-To send and receive from a single chatmail relay: 
+```bash
+# Create a virtual environment
+python3 -m venv cmping-venv
 
-    cmping nine.testrun.org   # <-- substitute with the domain you want to test 
+# Activate the virtual environment
+source cmping-venv/bin/activate  # On Linux/macOS
+cmping-venv\Scripts\activate     # On Windows
 
-To send from first domain to a second domain and receive from second domain: 
+# Install cmping
+pip install cmping
+```
 
-    cmping nine.testrun.org arcanechat.me 
+**Note**: This package requires `deltachat-rpc-client` version **2.51.0** (pinned) to work correctly.
+
+## Quick start
+
+To send and receive from a single chatmail relay:
+
+    cmping chatmail.uk   # <-- substitute with the domain you want to test 
+
+To send from first domain to a second domain and receive from second domain:
+
+    cmping chatmail.uk arcanechat.me 
 
 To show help:
 
-    cmping -h 
+    cmping -h
 
+Custom login length (default 9 symbols):
+
+To specify a custom login/username length before @server.tld, use the `-l` or `--login-length` option:
+
+    cmping -l 10 chatmail.uk   # generates logins with 10 characters
+    cmping -l 8 chatmail.uk     # generates logins with 8 characters 
+
+### Custom login length example
+
+Using `-l 10` to generate logins with 10 characters instead of the default 9:
+
+    $ cmping -l 10 -c 3 chatmail.uk 
+
+    # using accounts_dir at: /home/user/.cache/cmping
+    PING chatmail.uk(7x2m9p3wqr@chatmail.uk) -> chatmail.uk(n8v5c1x6zt@chatmail.uk) count=3
+    64 bytes ME -> chatmail.uk -> chatmail.uk -> ME seq=0 time=245.32ms
+    64 bytes ME -> chatmail.uk -> chatmail.uk -> ME seq=1 time=238.76ms
+    64 bytes ME -> chatmail.uk -> chatmail.uk -> ME seq=2 time=251.09ms
+    --- 7x2m9p3wqr@chatmail.uk -> n8v5c1x6zt@chatmail.uk statistics ---
+    3 transmitted, 3 received, 0.00% loss
+    rtt min/avg/max/mdev = 238.760/245.057/251.090/5.368 ms
 
 ## Example outputs
 
-Example output for single-domain ping: 
+Example output for single-domain ping:
 
     $ cmping -c 10 nine.testrun.org 
 
@@ -39,7 +76,7 @@ Example output for single-domain ping:
     10 transmitted, 10 received, 0.00% loss
     rtt min/avg/max/mdev = 209.661/281.833/490.416/81.265 ms
 
-Example output for two-domain ping: 
+Example output for two-domain ping:
 
     $ cmping -c 10 mailchat.pl mehl.cloud 
     # using accounts_dir at: /home/user/.cache/cmping
@@ -58,10 +95,9 @@ Example output for two-domain ping:
     10 transmitted, 10 received, 0.00% loss
     rtt min/avg/max/mdev = 367.384/417.246/792.292/132.163 ms
 
-
 ## Developing / Releasing cmping
 
-1. clone the git repository at https://github.com/chatmail/cmping 
+1. clone the git repository at <https://github.com/chatmail/cmping>
 
 2. install 'cmping" in editing mode: `pip install -e .`
 
