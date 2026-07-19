@@ -13,6 +13,7 @@
 - Explicitly pass `ih` (IMAP host) and `sh` (SMTP host) parameters in the constructed `dclogin` URL for fallback and manual flows, ensuring compatibility with relays lacking SRV records and standard subdomains.
 - Recreate the account context if the first QR code configuration attempt fails. This ensures the account is in a clean state before attempting fallback configurations (preventing configuration state conflicts).
 - Pin `deltachat-rpc-server` version to `2.51.0` in `pyproject.toml` to match the pinned client version.
+- Fix infinite hang in `wait_all_online` by raising an exception immediately when an `ERROR` event is received during profile initialization (fixes #19).
 
 ### Added
 

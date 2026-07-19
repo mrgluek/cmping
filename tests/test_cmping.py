@@ -171,6 +171,44 @@ class TestCmping(unittest.TestCase):
         mock_clean_account.set_config_from_qr.assert_called_with(expected_dclogin)
         mock_clean_account.start_io.assert_called_once()
 
+    def test_wait_all_online_success(self):
+        mock_dc = MagicMock()
+        mock_account = MagicMock()
+        
+        # Mock wait_for_event to return IMAP_INBOX_IDLE event
+        mock_event = MagicMock()
+        mock_event.kind = cmping.EventType.IMAP_INBOX_IDLE
+        mock_account.wait_for_event.return_value = mock_event
+        mock_account.get_config.return_value = "test@domain.com"
+        
+        maker = cmping.AccountMaker(mock_dc, verbose=0)
+        maker.online = [mock_account]
+        
+        # Should complete without throwing exception
+        maker.wait_all_online()
+        mock_account.wait_for_event.assert_called_once()
+
+    def test_wait_all_online_error_raises_exception(self):
+        mock_dc = MagicMock()
+        mock_account = MagicMock()
+        
+        # Mock wait_for_event to return ERROR event
+        mock_event = MagicMock()
+        mock_event.kind = cmping.EventType.ERROR
+        mock_event.msg = "Connection timed out"
+        mock_account.wait_for_event.return_value = mock_event
+        mock_account.get_config.return_value = "test@domain.com"
+        
+        maker = cmping.AccountMaker(mock_dc, verbose=0)
+        maker.online = [mock_account]
+        
+        # Should raise an Exception
+        with self.assertRaises(Exception) as context:
+            maker.wait_all_online()
+            
+        self.assertIn("Profile setup error: Connection timed out", str(context.exception))
+        mock_account.wait_for_event.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()

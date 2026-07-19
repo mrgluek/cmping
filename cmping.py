@@ -304,8 +304,10 @@ class AccountMaker:
                         addr = ac.get_config("addr")
                         print(f"✓ IMAP_INBOX_IDLE: {addr} is now idle and ready")
                     break
-                elif event.kind == EventType.ERROR and self.verbose >= 1:
-                    print(f"✗ ERROR during profile setup: {event.msg}")
+                elif event.kind == EventType.ERROR:
+                    if self.verbose >= 1:
+                        print(f"✗ ERROR during profile setup: {event.msg}")
+                    raise Exception(f"Profile setup error: {event.msg}")
                 elif self.verbose >= 3:
                     # Show all events during online phase when verbose level 3
                     addr = ac.get_config("addr")
