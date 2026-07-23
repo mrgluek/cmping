@@ -6,6 +6,7 @@
 ### Maintenance
 
 - Remove version pinning for `deltachat-rpc-server` and `deltachat-rpc-client` and update minimum required version to `2.56.0`.
+- Add `starting_version = "0.17.2"` fallback in `pyproject.toml` for `setuptools-git-versioning` to avoid defaulting to `0.0.1` when installed from git archives without tags.
 
 ## 0.17.1
 
