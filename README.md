@@ -16,7 +16,7 @@ cmping-venv\Scripts\activate     # On Windows
 pip install cmping
 ```
 
-**Note**: This package requires `deltachat-rpc-client` version **2.51.0** (pinned) to work correctly.
+**Note**: This package requires `deltachat-rpc-client` version **2.56.0** or higher to work correctly.
 
 ## Quick start
 

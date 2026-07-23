@@ -1,6 +1,12 @@
 
 # cmping changelog 
 
+## 0.17.2
+
+### Maintenance
+
+- Remove version pinning for `deltachat-rpc-server` and `deltachat-rpc-client` and update minimum required version to `2.56.0`.
+
 ## 0.17.1
 
 ### Bug Fixes
