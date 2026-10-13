@@ -301,7 +301,7 @@ class AccountMaker:
                 event = ac.wait_for_event()
                 if event.kind == EventType.IMAP_INBOX_IDLE:
                     if self.verbose >= 3:
-                        addr = ac.get_config("addr")
+                        addr = (ac.get_config("configured_addr") or ac.get_config("addr"))
                         print(f"✓ IMAP_INBOX_IDLE: {addr} is now idle and ready")
                     break
                 elif event.kind == EventType.ERROR:
@@ -310,12 +310,12 @@ class AccountMaker:
                     raise Exception(f"Profile setup error: {event.msg}")
                 elif self.verbose >= 3:
                     # Show all events during online phase when verbose level 3
-                    addr = ac.get_config("addr")
+                    addr = (ac.get_config("configured_addr") or ac.get_config("addr"))
                     self._log_event(event, addr)
 
     def _add_online(self, account):
         if self.verbose >= 3:
-            addr = account.get_config("addr")
+            addr = (account.get_config("configured_addr") or account.get_config("addr"))
             print(f"  Starting I/O for account: {addr}")
 
         # Enable bot mode in all accounts before starting I/O
@@ -366,7 +366,7 @@ class AccountMaker:
                     print(f"  Configuring account from QR: {domain}")
                 account.set_config_from_qr(qr_url)
                 if self.verbose >= 3:
-                    addr = account.get_config("addr")
+                    addr = (account.get_config("configured_addr") or account.get_config("addr"))
                     print(f"  Account configured: {addr}")
             except Exception as e:
                 # Fallback routine for domain names and HTTPS URLs
@@ -450,7 +450,7 @@ class AccountMaker:
                         try:
                             account.set_config_from_qr(dclogin_url)
                             if self.verbose >= 3:
-                                addr = account.get_config("addr")
+                                addr = (account.get_config("configured_addr") or account.get_config("addr"))
                                 print(f"  Account configured: {addr}")
                         except Exception as e3:
                             print(f"✗ Failed to configure profile with manual credentials: {e3}")
@@ -534,7 +534,7 @@ def create_group(sender, receivers, verbose=0):
         # Create a contact for the receiver account and add to group
         contact = sender.create_contact(receiver)
         if verbose >= 3:
-            receiver_addr = receiver.get_config("addr")
+            receiver_addr = (receiver.get_config("configured_addr") or receiver.get_config("addr"))
             print(f"  Adding {receiver_addr} to group")
         group.add_contact(contact)
 
@@ -818,8 +818,8 @@ class Pinger:
         self.sender = sender
         self.group = group
         self.receivers = receivers
-        self.addr1 = sender.get_config("addr")
-        self.receivers_addrs = [receiver.get_config("addr") for receiver in receivers]
+        self.addr1 = (sender.get_config("configured_addr") or sender.get_config("addr"))
+        self.receivers_addrs = [(receiver.get_config("configured_addr") or receiver.get_config("addr")) for receiver in receivers]
         self.receivers_addrs_str = ", ".join(self.receivers_addrs)
         self.relay1 = self.addr1.split("@")[1]
         self.relay2 = self.receivers_addrs[0].split("@")[1]
