@@ -1,6 +1,21 @@
 
 # cmping changelog 
 
+## 0.17.4
+
+### Bug Fixes
+
+- Limit each automatic configure attempt to 20 s (`CONFIGURE_TIMEOUT`). Core has no overall configure timeout; a relay whose autoconfig lists ports that are unreachable from the client's network (seen with `chat.chudppl.org`) hung `set_config_from_qr()` until the caller's timeout killed the whole run. On timeout core is asked to stop via `stop_ongoing_process`.
+- The HTTPS `/new` + `dclogin` fallback now names IMAP 993 and SMTP 465 with SSL explicitly for domain relays (`is=ssl`, `ss=ssl`), so core skips autoconfig. IP relays keep `ic=3&ss=default`.
+- Remove the new account when no path configures it, and remove unconfigured accounts left by killed runs at the start of each run. Configured accounts are never removed.
+
+## 0.17.3
+
+### Bug Fixes
+
+- Read `configured_addr` (`addr` is `None` on core 2.61+), fixing a `TypeError` in `Pinger`.
+- Delete chats left over from earlier runs before each ping, so cached profiles no longer grow without bound.
+
 ## 0.17.2
 
 ### Maintenance

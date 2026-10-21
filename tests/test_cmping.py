@@ -163,10 +163,10 @@ class TestCmping(unittest.TestCase):
         self.assertEqual(account, mock_clean_account)
         mock_try_https.assert_called_with("domain.com", 0)
         
-        # Verify correct dclogin URL structure with ih and sh
+        # Domain relay: explicit standard ports with SSL, no autoconfig
         expected_dclogin = (
             "dclogin:fallback@domain.com/?"
-            "p=fallback_password&v=1&ih=domain.com&sh=domain.com&ip=993&sp=465&ic=3&ss=default"
+            "p=fallback_password&v=1&ih=domain.com&ip=993&is=ssl&sh=domain.com&sp=465&ss=ssl"
         )
         mock_clean_account.set_config_from_qr.assert_called_with(expected_dclogin)
         mock_clean_account.start_io.assert_called_once()
@@ -249,6 +249,132 @@ class TestDeleteOldChats(unittest.TestCase):
         account, chats = self._account(2, [10, 11])
         chats[0].delete.side_effect = Exception("gone")
         self.assertEqual(cmping.delete_old_chats([broken, account]), 1)
+
+
+class TestAccountCreationHardening(unittest.TestCase):
+    """Configure attempts are time limited and failures leave no accounts."""
+
+    def _hanging_account(self, release):
+        # set_config_from_qr blocks like core hanging on an unreachable port;
+        # stop_ongoing_process makes it fail like core's "Canceled".
+        account = MagicMock()
+        account.id = 7
+
+        def hang(qr):
+            release.wait(5)
+            raise Exception("Canceled")
+
+        account.set_config_from_qr.side_effect = hang
+        account._rpc.stop_ongoing_process.side_effect = lambda acc_id: release.set()
+        return account
+
+    def test_build_dclogin_url(self):
+        self.assertEqual(
+            cmping.build_dclogin_url("u@relay.example", "p/w"),
+            "dclogin:u@relay.example/?p=p%2Fw&v=1&ih=relay.example&ip=993&is=ssl"
+            "&sh=relay.example&sp=465&ss=ssl",
+        )
+        # IP relays keep the old parameters
+        self.assertEqual(
+            cmping.build_dclogin_url("u@1.2.3.4", "pw"),
+            "dclogin:u@1.2.3.4/?p=pw&v=1&ih=1.2.3.4&sh=1.2.3.4&ip=993&sp=465&ic=3&ss=default",
+        )
+
+    def test_configure_with_timeout_stops_hanging_configure(self):
+        import threading
+        release = threading.Event()
+        account = self._hanging_account(release)
+        self.assertFalse(cmping.configure_with_timeout(account, "dcaccount:x", timeout=0.1))
+        account._rpc.stop_ongoing_process.assert_called_once_with(7)
+
+    @patch("cmping.CONFIGURE_TIMEOUT", 0.1)
+    @patch("cmping.try_https_endpoint")
+    def test_timeout_then_fallback_success(self, mock_try_https):
+        import threading
+        release = threading.Event()
+        hanging = self._hanging_account(release)
+        good = MagicMock()
+        good.is_configured.return_value = True
+        mock_dc = MagicMock()
+        mock_dc.get_all_accounts.return_value = []
+        mock_dc.add_account.side_effect = [hanging, good]
+        mock_try_https.return_value = ("abc@relay.example", "pw")
+
+        account = cmping.AccountMaker(mock_dc).get_relay_account("relay.example")
+
+        self.assertIs(account, good)
+        hanging._rpc.stop_ongoing_process.assert_called_once()
+        hanging.remove.assert_called_once()
+        good.set_config_from_qr.assert_called_once_with(
+            "dclogin:abc@relay.example/?p=pw&v=1&ih=relay.example&ip=993&is=ssl"
+            "&sh=relay.example&sp=465&ss=ssl"
+        )
+        good.remove.assert_not_called()
+        good.start_io.assert_called_once()
+
+    @patch("cmping.try_https_endpoint")
+    def test_both_paths_fail_account_removed(self, mock_try_https):
+        first = MagicMock()
+        first.set_config_from_qr.side_effect = Exception("dcaccount failed")
+        second = MagicMock()
+        second.set_config_from_qr.side_effect = Exception("login failed")
+        mock_dc = MagicMock()
+        mock_dc.get_all_accounts.return_value = []
+        mock_dc.add_account.side_effect = [first, second]
+        mock_try_https.return_value = ("abc@relay.example", "pw")
+
+        with patch("sys.stdin.isatty", return_value=False):
+            with self.assertRaises(Exception):
+                cmping.AccountMaker(mock_dc).get_relay_account("relay.example")
+
+        first.remove.assert_called_once()
+        second.remove.assert_called_once()
+        second.start_io.assert_not_called()
+
+    @patch("cmping.try_https_endpoint", return_value=None)
+    def test_no_https_credentials_account_removed(self, mock_try_https):
+        first = MagicMock()
+        first.set_config_from_qr.side_effect = Exception("dcaccount failed")
+        mock_dc = MagicMock()
+        mock_dc.get_all_accounts.return_value = []
+        mock_dc.add_account.return_value = first
+
+        with patch("sys.stdin.isatty", return_value=False):
+            with self.assertRaises(Exception):
+                cmping.AccountMaker(mock_dc).get_relay_account("relay.example")
+        first.remove.assert_called_once()
+        mock_dc.add_account.assert_called_once()
+
+    def test_leftover_unconfigured_accounts_removed(self):
+        configured = MagicMock()
+        configured.is_configured.return_value = True
+        configured.get_config.side_effect = (
+            lambda key: "me@relay.example" if key == "configured_addr" else None
+        )
+        leftover = MagicMock()
+        leftover.is_configured.return_value = False
+        leftover.get_config.return_value = None
+        unknown = MagicMock()
+        unknown.is_configured.side_effect = Exception("rpc error")
+        unknown.get_config.return_value = None
+        mock_dc = MagicMock()
+        mock_dc.get_all_accounts.return_value = [leftover, unknown, configured]
+
+        maker = cmping.AccountMaker(mock_dc)
+        self.assertIs(maker.get_relay_account("relay.example"), configured)
+        leftover.remove.assert_called_once()
+        # Configured accounts and accounts of unknown state are kept
+        configured.remove.assert_not_called()
+        unknown.remove.assert_not_called()
+        mock_dc.add_account.assert_not_called()
+
+        # Cleanup runs once per maker, not for every receiver
+        leftover.remove.reset_mock()
+        mock_dc.get_all_accounts.return_value = [leftover]
+        maker.remove_unconfigured_accounts = MagicMock()
+        mock_dc.add_account.return_value = MagicMock()
+        maker.get_relay_account("relay.example")
+        maker.remove_unconfigured_accounts.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -279,11 +279,97 @@ def main():
     raise SystemExit(0 if pinger.received == expected_total else 1)
 
 
+# Seconds one configure attempt may take. Core has no overall configure
+# timeout: chat.chudppl.org's autoconfig lists ports that are unreachable from
+# some networks first, and core then hangs on them for minutes. Callers such
+# as monitors run cmping with a 60-90 s timeout, so a hanging configure got
+# the whole run killed. 20 s is plenty for a reachable relay (usually < 2 s)
+# and leaves time for the dclogin fallback.
+CONFIGURE_TIMEOUT = 20.0
+
+# Seconds to wait for the configure call to return after asking core to stop.
+CONFIGURE_STOP_GRACE = 5.0
+
+
+def build_dclogin_url(email, password):
+    """Build a dclogin URL for credentials obtained from an HTTPS endpoint.
+
+    For a domain relay the URL names the standard ports explicitly
+    (IMAP 993 and SMTP 465, both SSL), so core tries only those and skips
+    autoconfig, whose port list may start with ports that are blocked from
+    our network. IP relays keep the old parameters (ic=3 accepts their
+    self-signed certificates, ss=default lets core pick the security).
+    """
+    username, host = email.split("@", 1)
+    encoded_password = urllib.parse.quote(password, safe="")
+    if is_ip_address(host):
+        params = f"ih={host}&sh={host}&ip=993&sp=465&ic=3&ss=default"
+    else:
+        params = f"ih={host}&ip=993&is=ssl&sh={host}&sp=465&ss=ssl"
+    return f"dclogin:{username}@{host}/?p={encoded_password}&v=1&{params}"
+
+
+def configure_with_timeout(account, qr_url, timeout=None, verbose=0):
+    """Configure account from a dcaccount/dclogin QR code within timeout seconds.
+
+    set_config_from_qr() blocks until core finishes configuring, with no time
+    limit of its own. It runs in a helper thread; on timeout core is told to
+    stop (configure is an "ongoing process" core can cancel) and we wait a
+    little for the call to return.
+
+    Returns True if the account is configured, False on error or timeout.
+    """
+    if timeout is None:
+        timeout = CONFIGURE_TIMEOUT
+    result = {}
+
+    def run():
+        try:
+            account.set_config_from_qr(qr_url)
+            result["ok"] = True
+        except Exception as e:
+            result["error"] = e
+
+    # Daemon thread: if core never answers, it must not keep cmping alive.
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    thread.join(timeout)
+    if thread.is_alive():
+        if verbose >= 2:
+            print(f"\n✗ Configure did not finish within {timeout:.0f}s, stopping it")
+        try:
+            # Account has no wrapper for this JSON-RPC method.
+            account._rpc.stop_ongoing_process(account.id)
+        except Exception as e:
+            if verbose >= 3:
+                print(f"  stop_ongoing_process failed: {e}")
+        thread.join(CONFIGURE_STOP_GRACE)
+        return False
+    if "error" in result:
+        if verbose >= 2:
+            print(f"\n✗ Configure failed: {result['error']}")
+        return False
+    try:
+        return bool(account.is_configured())
+    except Exception:
+        return False
+
+
+def remove_account_quietly(account, verbose=0):
+    """Remove an account, ignoring errors (it may already be gone)."""
+    try:
+        account.remove()
+    except Exception as e:
+        if verbose >= 3:
+            print(f"  Could not remove account {account.id}: {e}")
+
+
 class AccountMaker:
     def __init__(self, dc, verbose=0):
         self.dc = dc
         self.online = []
         self.verbose = verbose
+        self._cleaned_up = False
 
     def _log_event(self, event, addr):
         """Helper method to log events at verbose level 3."""
@@ -324,7 +410,32 @@ class AccountMaker:
         account.start_io()
         self.online.append(account)
 
+    def remove_unconfigured_accounts(self):
+        """Remove accounts that never finished configuring.
+
+        A run killed during configure (e.g. by a caller's timeout) leaves an
+        unconfigured account in the accounts dir; without cleanup every such
+        run adds one more. Configured accounts are never touched, as some
+        relays only hand out new accounts from certain networks.
+        """
+        for account in self.dc.get_all_accounts():
+            if account in self.online:
+                continue
+            try:
+                configured = account.is_configured()
+            except Exception:
+                # Unknown state: keep it rather than risk losing an account.
+                continue
+            if not configured:
+                if self.verbose >= 2:
+                    print(f"  Removing unconfigured leftover account {account.id}")
+                remove_account_quietly(account, self.verbose)
+
     def get_relay_account(self, domain):
+        if not self._cleaned_up:
+            self._cleaned_up = True
+            self.remove_unconfigured_accounts()
+
         # Try to find an existing account for this domain/IP/URL
         for account in self.dc.get_all_accounts():
             addr = account.get_config("configured_addr")
@@ -352,118 +463,7 @@ class AccountMaker:
                             print(f"  Reusing existing account: {addr}")
                         break
         else:
-            # Try to create a new account using QR code first
-            account = self.dc.add_account()
-            if self.verbose >= 3:
-                print(f"  Creating new account for domain: {domain}")
-            qr_url = create_qr_url(domain)
-            
-            # Check if this is a domain name (not an IP or HTTPS URL)
-            is_domain = not is_ip_address(domain) and not domain.startswith("https://")
-            
-            try:
-                if self.verbose >= 3:
-                    print(f"  Configuring account from QR: {domain}")
-                account.set_config_from_qr(qr_url)
-                if self.verbose >= 3:
-                    addr = (account.get_config("configured_addr") or account.get_config("addr"))
-                    print(f"  Account configured: {addr}")
-            except Exception as e:
-                # Fallback routine for domain names and HTTPS URLs
-                is_fallback_applicable = not is_ip_address(domain)
-                if is_fallback_applicable and self.verbose >= 2:
-                    print(f"\n✗ Failed to configure profile on {domain} via QR: {e}")
-                    print("  Trying HTTPS endpoint fallback...")
-                
-                # Try to obtain account from HTTPS endpoint
-                if is_fallback_applicable:
-                    result = try_https_endpoint(domain, self.verbose)
-                    if result:
-                        email, password = result
-                        if self.verbose >= 2:
-                            print(f"  Successfully obtained credentials from HTTPS endpoint: {email}")
-                        
-                        # Recreate account to prevent configuration conflicts
-                        try:
-                            account.remove()
-                        except Exception:
-                            pass
-                        account = self.dc.add_account()
-
-                        # Configure account with the obtained credentials
-                        try:
-                            username, email_domain = email.split("@", 1)
-                            encoded_password = urllib.parse.quote(password, safe="")
-                            dclogin_url = (
-                                f"dclogin:{username}@{email_domain}/?"
-                                f"p={encoded_password}&v=1&ih={email_domain}&sh={email_domain}&ip=993&sp=465&ic=3&ss=default"
-                            )
-                            account.set_config_from_qr(dclogin_url)
-                        except Exception as e2:
-                            if self.verbose >= 3:
-                                print(f"  Failed to configure from HTTPS endpoint result: {e2}")
-                    else:
-                        if self.verbose >= 2:
-                            print(f"  HTTPS endpoint fallback failed for {domain}")
-                
-                # If QR and HTTPS endpoint both failed, ask for manual credentials
-                if not account.get_config("configured_addr"):
-                    # Check if we're in an interactive environment
-                    import sys
-                    is_interactive = sys.stdin.isatty() and sys.stdout.isatty()
-                    
-                    if is_interactive:
-                        print(f"\n✗ Failed to automatically create account for {domain}")
-                        print("Please enter your credentials manually:")
-                        
-                        # Get email address
-                        while True:
-                            email = input(f"Enter email address for {domain} (e.g., yourlogin@{domain}): ").strip()
-                            if email and '@' in email:
-                                break
-                            print("Invalid email format. Please try again.")
-                        
-                        # Get password
-                        while True:
-                            password = getpass.getpass(f"Enter password for {email}: ")
-                            if password:
-                                break
-                            print("Password cannot be empty. Please try again.")
-                        
-                        # Recreate account to prevent configuration conflicts
-                        try:
-                            account.remove()
-                        except Exception:
-                            pass
-                        account = self.dc.add_account()
-
-                        # Configure account with manual credentials
-                        if self.verbose >= 3:
-                            print(f"  Configuring account manually: {email}")
-                        # Create a dclogin URL with the manual credentials
-                        username, email_domain = email.split("@", 1)
-                        encoded_password = urllib.parse.quote(password, safe="")
-                        dclogin_url = (
-                            f"dclogin:{username}@{email_domain}/?"
-                            f"p={encoded_password}&v=1&ih={email_domain}&sh={email_domain}&ip=993&sp=465&ic=3&ss=default"
-                        )
-                        try:
-                            account.set_config_from_qr(dclogin_url)
-                            if self.verbose >= 3:
-                                addr = (account.get_config("configured_addr") or account.get_config("addr"))
-                                print(f"  Account configured: {addr}")
-                        except Exception as e3:
-                            print(f"✗ Failed to configure profile with manual credentials: {e3}")
-                            raise
-                    else:
-                        # Not in interactive mode, fail gracefully
-                        print(f"\n✗ Failed to automatically create account for {domain}")
-                        print("  (HTTPS endpoint fallback also failed)")
-                        print(f"✗ Cannot proceed in non-interactive mode - cannot prompt for manual credentials")
-                        raise Exception(f"Account creation failed for {domain}")
-                else:
-                    # QR configuration succeeded, but we need to handle the _add_online failure
-                    pass
+            account = self._create_account(domain)
 
         try:
             self._add_online(account)
@@ -471,6 +471,72 @@ class AccountMaker:
             print(f"✗ Failed to bring profile online for {domain}: {e}")
             raise
 
+        return account
+
+    def _create_account(self, domain):
+        """Create and configure a new account on domain.
+
+        Order: dcaccount QR (core creates the account), then for domain
+        relays the HTTPS /new endpoint + dclogin with standard ports, then
+        (only on a terminal) manually entered credentials. Each automatic
+        attempt is time limited. An account that ends up unconfigured is
+        removed, so failed runs leave nothing behind.
+        """
+        account = self.dc.add_account()
+        if self.verbose >= 3:
+            print(f"  Creating new account for domain: {domain}")
+            print(f"  Configuring account from QR: {domain}")
+        if configure_with_timeout(account, create_qr_url(domain), verbose=self.verbose):
+            if self.verbose >= 3:
+                print(f"  Account configured: {account.get_config('configured_addr')}")
+            return account
+
+        # Partly configured state could confuse the next attempt: start over
+        # with a fresh account.
+        remove_account_quietly(account, self.verbose)
+
+        # Fallback for domain names and HTTPS URLs. IP relays get random
+        # credentials in the dclogin QR already, there is no /new to ask.
+        if not is_ip_address(domain):
+            if self.verbose >= 2:
+                print(f"\n✗ Failed to configure profile on {domain} via QR")
+                print("  Trying HTTPS endpoint fallback...")
+            result = try_https_endpoint(domain, self.verbose)
+            if result:
+                email, password = result
+                if self.verbose >= 2:
+                    print(f"  Successfully obtained credentials from HTTPS endpoint: {email}")
+                account = self.dc.add_account()
+                if configure_with_timeout(
+                    account, build_dclogin_url(email, password), verbose=self.verbose
+                ):
+                    if self.verbose >= 3:
+                        print(f"  Account configured: {email}")
+                    return account
+                remove_account_quietly(account, self.verbose)
+            elif self.verbose >= 2:
+                print(f"  HTTPS endpoint fallback failed for {domain}")
+
+        if not (sys.stdin.isatty() and sys.stdout.isatty()):
+            # Not in interactive mode, fail gracefully
+            print(f"\n✗ Failed to automatically create account for {domain}")
+            print("  (HTTPS endpoint fallback also failed)")
+            print("✗ Cannot proceed in non-interactive mode - cannot prompt for manual credentials")
+            raise Exception(f"Account creation failed for {domain}")
+
+        email, password = prompt_manual_credentials(domain)
+        account = self.dc.add_account()
+        if self.verbose >= 3:
+            print(f"  Configuring account manually: {email}")
+        try:
+            # No time limit: a person is watching and can press Ctrl-C.
+            account.set_config_from_qr(build_dclogin_url(email, password))
+        except Exception as e3:
+            print(f"✗ Failed to configure profile with manual credentials: {e3}")
+            remove_account_quietly(account, self.verbose)
+            raise
+        if self.verbose >= 3:
+            print(f"  Account configured: {account.get_config('configured_addr')}")
         return account
 
 

@@ -16,7 +16,7 @@ dynamic = ["version"]
 
 [tool.setuptools-git-versioning]
 enabled = true
-starting_version = "0.17.2"
+starting_version = "0.17.4"
 
 [tool.setuptools]
 py-modules = ["cmping"]
