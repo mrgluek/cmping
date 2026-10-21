@@ -210,5 +210,46 @@ class TestCmping(unittest.TestCase):
         mock_account.wait_for_event.assert_called_once()
 
 
+
+class TestDeleteOldChats(unittest.TestCase):
+    def _account(self, acc_id, chat_ids):
+        account = MagicMock()
+        account.id = acc_id
+        chats = []
+        for cid in chat_ids:
+            chat = MagicMock()
+            chat.id = cid
+            chats.append(chat)
+        account.get_chatlist.return_value = chats
+        return account, chats
+
+    def test_deletes_real_chats_and_skips_specials(self):
+        account, chats = self._account(1, [6, 10, 11])
+        self.assertEqual(cmping.delete_old_chats([account]), 2)
+        account.get_chatlist.assert_called_once_with(no_specials=True)
+        chats[0].delete.assert_not_called()
+        chats[1].delete.assert_called_once()
+        chats[2].delete.assert_called_once()
+
+    def test_same_account_is_cleaned_once(self):
+        # relay1 == relay2: sender and a receiver can share the profile list
+        account, _ = self._account(1, [10])
+        self.assertEqual(cmping.delete_old_chats([account, account]), 1)
+        account.get_chatlist.assert_called_once()
+
+    def test_time_budget_stops_cleanup(self):
+        account, chats = self._account(1, [10, 11, 12])
+        self.assertEqual(cmping.delete_old_chats([account], time_budget=0), 0)
+        for chat in chats:
+            chat.delete.assert_not_called()
+
+    def test_errors_do_not_stop_the_run(self):
+        broken, _ = self._account(1, [])
+        broken.get_chatlist.side_effect = Exception("rpc down")
+        account, chats = self._account(2, [10, 11])
+        chats[0].delete.side_effect = Exception("gone")
+        self.assertEqual(cmping.delete_old_chats([broken, account]), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

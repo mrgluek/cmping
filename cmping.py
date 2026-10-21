@@ -520,6 +520,56 @@ def setup_accounts(args, sender_maker, receiver_maker):
     return sender, receivers
 
 
+# Chat ids up to 9 are special (trash, archive link, ...), never real chats
+LAST_SPECIAL_CHAT_ID = 9
+
+
+def delete_old_chats(accounts, time_budget=10.0, verbose=0):
+    """Delete chats left over from earlier runs in the cached profiles.
+
+    Every run creates a new "cmping" group on the sender and on each receiver.
+    Nothing deleted them, so profiles reused across runs grew without bound
+    (tens of thousands of groups, 20+ MB dc.db per profile for a monitor that
+    pings every half hour). Clean up at the start of a run, not at its end: a
+    run can be cut short by a timeout or SIGINT before any end-of-run cleanup.
+
+    Deleting is local only (messages on the server are left alone). The time
+    budget keeps a first run on a big old profile from slowing the ping; the
+    rest is deleted on the next runs.
+
+    Returns the number of deleted chats.
+    """
+    deadline = time.time() + time_budget
+    deleted = 0
+    seen = set()
+    for account in accounts:
+        if account.id in seen:
+            continue
+        seen.add(account.id)
+        try:
+            chats = account.get_chatlist(no_specials=True)
+        except Exception as e:
+            if verbose >= 1:
+                print(f"✗ Could not list chats for cleanup: {e}")
+            continue
+        for chat in chats:
+            if chat.id <= LAST_SPECIAL_CHAT_ID:
+                continue
+            if time.time() >= deadline:
+                if verbose >= 2:
+                    print(f"  Chat cleanup paused after {deleted} chats (time budget)")
+                return deleted
+            try:
+                chat.delete()
+                deleted += 1
+            except Exception as e:
+                if verbose >= 1:
+                    print(f"✗ Could not delete chat {chat.id}: {e}")
+    if verbose >= 2 and deleted:
+        print(f"  Deleted {deleted} chats from earlier runs")
+    return deleted
+
+
 def create_group(sender, receivers, verbose=0):
     """Create a group chat.
 
@@ -687,6 +737,9 @@ def perform_ping(args):
         wait_profiles_online_multi(all_makers)
 
         account_setup_time = time.time() - account_setup_start
+
+        # Not timed: housekeeping, not part of the relay's performance
+        delete_old_chats([sender] + list(receivers), verbose=args.verbose)
 
         group = create_group(sender, receivers, verbose=args.verbose)
 
