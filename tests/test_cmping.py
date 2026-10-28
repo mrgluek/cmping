@@ -110,7 +110,7 @@ class TestCmping(unittest.TestCase):
         
         # Mock existing account
         mock_account = MagicMock()
-        mock_account.get_config.side_effect = lambda key: "test@domain.com" if key in ("configured_addr", "addr") else None
+        mock_account.self_contact.get_snapshot.return_value.address = "test@domain.com"
         mock_dc.get_all_accounts.return_value = [mock_account]
 
         maker = cmping.AccountMaker(mock_dc, verbose=0)
@@ -348,9 +348,7 @@ class TestAccountCreationHardening(unittest.TestCase):
     def test_leftover_unconfigured_accounts_removed(self):
         configured = MagicMock()
         configured.is_configured.return_value = True
-        configured.get_config.side_effect = (
-            lambda key: "me@relay.example" if key == "configured_addr" else None
-        )
+        configured.self_contact.get_snapshot.return_value.address = "me@relay.example"
         leftover = MagicMock()
         leftover.is_configured.return_value = False
         leftover.get_config.return_value = None

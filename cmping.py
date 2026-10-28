@@ -62,6 +62,18 @@ def log_event_verbose(event, addr, verbose_level=3):
         print(f"  [{addr}] {event.kind}")
 
 
+def self_addr(account):
+    """The profile's own address, or "" if it is not configured.
+
+    Read from the self contact: core 2.66 removed the configured_addr config
+    (get_config raises "unknown key"), and "addr" has been empty since 2.61."""
+    try:
+        addr = account.self_contact.get_snapshot().address
+    except Exception:
+        return ""
+    return addr if isinstance(addr, str) else ""
+
+
 def is_ip_address(host):
     """Check if the given host is an IP address."""
     try:
@@ -387,7 +399,7 @@ class AccountMaker:
                 event = ac.wait_for_event()
                 if event.kind == EventType.IMAP_INBOX_IDLE:
                     if self.verbose >= 3:
-                        addr = (ac.get_config("configured_addr") or ac.get_config("addr"))
+                        addr = self_addr(ac)
                         print(f"✓ IMAP_INBOX_IDLE: {addr} is now idle and ready")
                     break
                 elif event.kind == EventType.ERROR:
@@ -396,12 +408,12 @@ class AccountMaker:
                     raise Exception(f"Profile setup error: {event.msg}")
                 elif self.verbose >= 3:
                     # Show all events during online phase when verbose level 3
-                    addr = (ac.get_config("configured_addr") or ac.get_config("addr"))
+                    addr = self_addr(ac)
                     self._log_event(event, addr)
 
     def _add_online(self, account):
         if self.verbose >= 3:
-            addr = (account.get_config("configured_addr") or account.get_config("addr"))
+            addr = self_addr(account)
             print(f"  Starting I/O for account: {addr}")
 
         # Enable bot mode in all accounts before starting I/O
@@ -438,8 +450,8 @@ class AccountMaker:
 
         # Try to find an existing account for this domain/IP/URL
         for account in self.dc.get_all_accounts():
-            addr = account.get_config("configured_addr")
-            if addr is not None:
+            addr = self_addr(account)
+            if addr:
                 # Extract the domain/IP/URL from the configured address
                 if "@" in addr:
                     addr_domain = addr.split("@")[1]
@@ -488,7 +500,7 @@ class AccountMaker:
             print(f"  Configuring account from QR: {domain}")
         if configure_with_timeout(account, create_qr_url(domain), verbose=self.verbose):
             if self.verbose >= 3:
-                print(f"  Account configured: {account.get_config('configured_addr')}")
+                print(f"  Account configured: {self_addr(account)}")
             return account
 
         # Partly configured state could confuse the next attempt: start over
@@ -536,7 +548,7 @@ class AccountMaker:
             remove_account_quietly(account, self.verbose)
             raise
         if self.verbose >= 3:
-            print(f"  Account configured: {account.get_config('configured_addr')}")
+            print(f"  Account configured: {self_addr(account)}")
         return account
 
 
@@ -650,7 +662,7 @@ def create_group(sender, receivers, verbose=0):
         # Create a contact for the receiver account and add to group
         contact = sender.create_contact(receiver)
         if verbose >= 3:
-            receiver_addr = (receiver.get_config("configured_addr") or receiver.get_config("addr"))
+            receiver_addr = self_addr(receiver)
             print(f"  Adding {receiver_addr} to group")
         group.add_contact(contact)
 
@@ -937,8 +949,8 @@ class Pinger:
         self.sender = sender
         self.group = group
         self.receivers = receivers
-        self.addr1 = (sender.get_config("configured_addr") or sender.get_config("addr"))
-        self.receivers_addrs = [(receiver.get_config("configured_addr") or receiver.get_config("addr")) for receiver in receivers]
+        self.addr1 = self_addr(sender)
+        self.receivers_addrs = [self_addr(receiver) for receiver in receivers]
         self.receivers_addrs_str = ", ".join(self.receivers_addrs)
         self.relay1 = self.addr1.split("@")[1]
         self.relay2 = self.receivers_addrs[0].split("@")[1]

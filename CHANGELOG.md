@@ -1,6 +1,12 @@
 
 # cmping changelog 
 
+## 0.17.5
+
+### Bug Fixes
+
+- Core 2.66 support: read the profile's own address from the self contact (`self_addr()`). Core 2.66 removed the `configured_addr` config, so `get_config("configured_addr")` raised "unknown key" and broke profile reuse, setup and the ping report; `addr` has been empty since core 2.61. Works with older cores too.
+
 ## 0.17.4
 
 ### Bug Fixes
