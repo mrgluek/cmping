@@ -1,34 +1,35 @@
 """
-chatmail ping aka "cmping" transmits messages between relays.
+chatmail ping aka "cmping": send Delta Chat messages between chatmail relays
+and time their delivery.
 
-Message Flow:
-=============
-1. ACCOUNT SETUP: Create sender and receiver accounts on specified relay domains
-   - Each account connects to its relay's IMAP/SMTP servers
-   - Accounts wait for IMAP_INBOX_IDLE state indicating readiness
+``cmping relay1 [relay2]``
+==========================
+1. SETUP: a sender profile on relay1 and receiver profiles on relay2 (-g, default
+   one), kept in ~/.cache/cmping/<relay> and reused across runs (--reset makes new
+   ones). All go online (IMAP IDLE); -w limits the wait.
+2. PING: the sender creates a group with the receivers and sends -c messages,
+   one every -i seconds. Each carries its send time.
+3. RECEIVE: when a receiver gets a message, its time is now minus the send time:
+   sender -> relay1 SMTP -> relay2 IMAP -> receiver, one way. Sender and receivers
+   run in this one process on one clock, so no clock sync is needed. The output
+   calls it "rtt" as ping does. Missing pings are given up --grace seconds after
+   the last one was sent.
+4. BACK (-b/--both): the first receiver sends to the sender the same way,
+   timing relay2 -> relay1 with the same profiles.
 
-2. GROUP CREATION: Sender creates a group chat and adds all receivers
-
-3. PING SEND: Sender transmits messages to the group at specified intervals
-   - Messages contain: unique-id timestamp sequence-number
-   - Messages flow: Sender -> relay1 SMTP -> relay2 IMAP -> Receivers
-
-4. PING RECEIVE: Each receiver waits for incoming messages
-   - On receipt, round-trip time is calculated from embedded timestamp
-   - Progress is tracked per-sequence across all receivers
-   - Stats are accumulated for final report
+Exit code 0 when every ping arrived in every direction, 1 otherwise.
+--json prints one result object on stdout (the usual output goes to stderr).
 """
 
 import argparse
 import contextlib
 import getpass
+import json
 import ipaddress
-import os
 import queue
 from queue import Empty
 import random
 import shutil
-import signal
 import string
 import sys
 import threading
@@ -83,19 +84,24 @@ def is_ip_address(host):
         return False
 
 
-def generate_credentials():
+class CmpingError(Exception):
+    """A run cannot go on (profile setup failed, profiles not online). main() reports it:
+    as a "✗" line in text mode, as the "error" field with --json."""
+
+
+def generate_credentials(length=9):
     """Generate random username and password for IP-based login.
 
     Returns:
         tuple: (username, password) where username is 9 chars (chatmail's default login length) and password is 20 chars
     """
     chars = string.ascii_lowercase + string.digits
-    username = "".join(random.choices(chars, k=9))
+    username = "".join(random.choices(chars, k=length))
     password = "".join(random.choices(chars, k=20))
     return username, password
 
 
-def create_qr_url(domain_or_ip):
+def create_qr_url(domain_or_ip, login_length=9):
     """Create either a dcaccount or dclogin URL based on input type.
 
     Args:
@@ -110,7 +116,7 @@ def create_qr_url(domain_or_ip):
     
     if is_ip_address(domain_or_ip):
         # Generate credentials for IP address
-        username, password = generate_credentials()
+        username, password = generate_credentials(login_length)
 
         # An address with an IP domain needs square brackets (user@[1.2.3.4]); the servers are
         # given explicitly as ih/sh (ported from upstream cmping cdff9b8)
@@ -230,9 +236,11 @@ def format_duration(seconds):
 
 
 def main():
-    """Ping between addresses of specified chatmail relay domains or IP addresses."""
-
-    parser = argparse.ArgumentParser(description=main.__doc__)
+    parser = argparse.ArgumentParser(
+        prog="cmping",
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     parser.add_argument(
         "relay1",
         action="store",
@@ -249,7 +257,7 @@ def main():
         dest="count",
         type=int,
         default=30,
-        help="number of message pings",
+        help="number of pings per direction (default 30)",
     )
     parser.add_argument(
         "-i",
@@ -278,7 +286,8 @@ def main():
         dest="login_length",
         type=int,
         default=9,
-        help="length of login/username before @server.tld (default 9)",
+        help="login length for profiles cmping creates itself, i.e. on IP relays "
+        "(default 9); a domain relay picks its own logins",
     )
     parser.add_argument(
         "-w",
@@ -287,13 +296,62 @@ def main():
         default=60,
         help="seconds to wait for profiles to come online (default 60)",
     )
+    parser.add_argument(
+        "--grace",
+        type=float,
+        default=60,
+        help="seconds to wait for missing pings after the last one is sent (default 60)",
+    )
+    parser.add_argument(
+        "-b", "--both",
+        action="store_true",
+        help="also ping back from relay2 to relay1 with the same profiles",
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="print one JSON result object on stdout; the usual output goes to stderr",
+    )
+    parser.add_argument("--version", action="version", version=f"%(prog)s {_version()}")
     args = parser.parse_args()
     if not args.relay2:
         args.relay2 = args.relay1
 
-    pinger = perform_ping(args)
-    expected_total = pinger.sent * args.numrecipients
-    raise SystemExit(0 if pinger.received == expected_total else 1)
+    result = {
+        "cmping": _version(),
+        "relay1": args.relay1,
+        "relay2": args.relay2,
+        "count": args.count,
+        "interval": args.interval,
+        "ok": False,
+        "error": None,
+        "account_setup_s": None,
+        "directions": [],
+        "warnings": [],
+    }
+    # With --json, stdout carries only the JSON object; progress and pings go to stderr
+    human_out = sys.stderr if args.json else sys.stdout
+    try:
+        with contextlib.redirect_stdout(human_out):
+            result.update(perform_ping(args))
+    except CmpingError as e:
+        print(f"\n✗ {e}", file=human_out)
+        result["error"] = str(e)
+    result["ok"] = result["error"] is None and bool(result["directions"]) and all(
+        d["sent"] == args.count and d["received"] == d["expected"] for d in result["directions"]
+    )
+    if args.json:
+        print(json.dumps(result, indent=2))
+    raise SystemExit(0 if result["ok"] else 1)
+
+
+def _version():
+    try:
+        from importlib.metadata import version
+
+        return version("cmping")
+    except Exception:
+        return "unknown"
 
 
 # Seconds one configure attempt may take. Core has no overall configure
@@ -382,8 +440,10 @@ def remove_account_quietly(account, verbose=0):
 
 
 class AccountMaker:
-    def __init__(self, dc, verbose=0):
+    def __init__(self, dc, verbose=0, login_length=9):
         self.dc = dc
+        # Only logins cmping generates itself (IP relays); a domain relay picks its own
+        self.login_length = login_length
         self.online = []
         self.verbose = verbose
         self._cleaned_up = False
@@ -513,7 +573,7 @@ class AccountMaker:
         if self.verbose >= 3:
             print(f"  Creating new account for domain: {domain}")
             print(f"  Configuring account from QR: {domain}")
-        if configure_with_timeout(account, create_qr_url(domain), verbose=self.verbose):
+        if configure_with_timeout(account, create_qr_url(domain, self.login_length), verbose=self.verbose):
             if self.verbose >= 3:
                 print(f"  Account configured: {self_addr(account)}")
             return account
@@ -592,8 +652,7 @@ def setup_accounts(args, sender_maker, receiver_maker):
         profiles_created += 1
         print_progress("Setting up profiles", profiles_created, total_profiles, profiles_created)
     except Exception as e:
-        print(f"\r✗ Failed to setup sender profile on {args.relay1}: {e}")
-        sys.exit(1)
+        raise CmpingError(f"Failed to setup sender profile on {args.relay1}: {e}") from e
 
     # Create receiver accounts
     receivers = []
@@ -604,8 +663,7 @@ def setup_accounts(args, sender_maker, receiver_maker):
             profiles_created += 1
             print_progress("Setting up profiles", profiles_created, total_profiles, profiles_created)
         except Exception as e:
-            print(f"\r✗ Failed to setup receiver profile {i+1} on {args.relay2}: {e}")
-            sys.exit(1)
+            raise CmpingError(f"Failed to setup receiver profile {i+1} on {args.relay2}: {e}") from e
 
     # Profile setup complete
     print_progress("Setting up profiles", done=True)
@@ -692,7 +750,7 @@ def wait_profiles_online(maker, timeout=60):
         timeout: Seconds after which waiting fails
 
     Raises:
-        SystemExit: If waiting for profiles fails
+        CmpingError: If waiting for profiles fails
     """
     # Flag to indicate when wait_all_online is complete
     online_complete = threading.Event()
@@ -721,8 +779,7 @@ def wait_profiles_online(maker, timeout=60):
     wait_thread.join()
 
     if online_error:
-        print(f"\n✗ Timeout or error waiting for profiles to be online: {online_error}")
-        sys.exit(1)
+        raise CmpingError(f"Timeout or error waiting for profiles to be online: {online_error}")
 
     print_progress("Waiting for profiles to be online", done=True)
 
@@ -735,7 +792,7 @@ def wait_profiles_online_multi(makers, timeout=60):
         timeout: Seconds after which waiting fails
 
     Raises:
-        SystemExit: If waiting for profiles fails
+        CmpingError: If waiting for profiles fails
     """
     online_errors = []
 
@@ -763,8 +820,7 @@ def wait_profiles_online_multi(makers, timeout=60):
         t.join()
 
     if online_errors:
-        print(f"\n✗ Timeout or error waiting for profiles to be online: {online_errors[0]}")
-        sys.exit(1)
+        raise CmpingError(f"Timeout or error waiting for profiles to be online: {online_errors[0]}")
 
     print_progress("Waiting for profiles to be online", done=True)
 
@@ -777,7 +833,10 @@ def perform_ping(args):
     2. message_time: Time to send and receive all ping messages
 
     Returns:
-        Pinger: The pinger object with results
+        dict: account_setup_s, directions (see ping_direction) and warnings
+
+    Raises:
+        CmpingError: when profiles cannot be set up or do not come online
     """
     base_accounts_dir = xdg_cache_home().joinpath("cmping")
     
@@ -815,7 +874,7 @@ def perform_ping(args):
                 print(f"✗ Failed to initialize RPC for {relay}: {e}")
                 raise
             dc = DeltaChat(rpc)
-            maker = AccountMaker(dc, verbose=args.verbose)
+            maker = AccountMaker(dc, verbose=args.verbose, login_length=args.login_length)
             relay_contexts[relay] = RelayContext(rpc=rpc, dc=dc, maker=maker)
 
         # Phase 1: Account Setup (timed)
@@ -836,103 +895,35 @@ def perform_ping(args):
         # Not timed: housekeeping, not part of the relay's performance
         delete_old_chats([sender] + list(receivers), verbose=args.verbose)
 
-        group = create_group(sender, receivers, verbose=args.verbose)
-
-        # Phase 2: Message Ping/Pong (timed)
-        message_start = time.time()
-
-        pinger = Pinger(args, sender, group, receivers)
-        received = {}
-        # Track current sequence for output formatting
-        current_seq = None
-        # Track timing for each sequence: {seq: {'count': N, 'first_time': ms, 'last_time': ms, 'size': bytes}}
-        seq_tracking = {}
-        try:
-            for seq, ms_duration, size, receiver_idx in pinger.receive():
-                if seq not in received:
-                    received[seq] = []
-                received[seq].append(ms_duration)
-
-                # Track timing for this sequence
-                if seq not in seq_tracking:
-                    seq_tracking[seq] = {
-                        "count": 0,
-                        "first_time": ms_duration,
-                        "last_time": ms_duration,
-                        "size": size,
-                    }
-                seq_tracking[seq]["count"] += 1
-                seq_tracking[seq]["last_time"] = ms_duration
-
-                # Print new line for new sequence or first message
-                if current_seq != seq:
-                    if current_seq is not None:
-                        print()  # End previous line
-                    # Start new line for this sequence
-                    print(
-                        f"{size} bytes ME -> {pinger.relay1} -> {pinger.relay2} -> ME seq={seq} time={ms_duration:0.2f}ms",
-                        end="",
-                        flush=True,
-                    )
-                    current_seq = seq
-
-                # Print N/M ratio with in-place update (spinning effect)
-                count = seq_tracking[seq]["count"]
-                total = args.numrecipients
-                # Calculate how many characters we need to overwrite from previous ratio
-                if count > 1:
-                    # Backspace over previous ratio to update in-place
-                    prev_count = count - 1
-                    prev_ratio_len = len(f" {prev_count}/{total}")
-                    print("\b" * prev_ratio_len, end="", flush=True)
-                print(f" {count}/{total}", end="", flush=True)
-
-                # If all receivers have received, print elapsed time
-                if count == total:
-                    first_time = seq_tracking[seq]["first_time"]
-                    last_time = seq_tracking[seq]["last_time"]
-                    elapsed = last_time - first_time
-                    print(f" (elapsed: {elapsed:0.2f}ms)", end="", flush=True)
-
-        except KeyboardInterrupt:
-            pass
-
-        message_time = time.time() - message_start
-
-        if current_seq is not None:
-            print()  # End last line
-
-        # Print statistics - show full addresses only in verbose >= 2
-        if args.verbose >= 2:
-            receivers_info = pinger.receivers_addrs_str
-        else:
-            receivers_info = f"{len(pinger.receivers_addrs)} receivers"
-        print(f"--- {pinger.addr1} -> {receivers_info} statistics ---")
-        print(
-            f"{pinger.sent} transmitted, {pinger.received} received, {pinger.loss:.2f}% loss"
+        result = {
+            "account_setup_s": round(account_setup_time, 3),
+            "directions": [],
+            "warnings": [],
+        }
+        result["directions"].append(
+            ping_direction(args, sender, receivers, args.relay1, args.relay2)
         )
-        if received:
-            all_durations = [d for durations in received.values() for d in durations]
-            rmin = min(all_durations)
-            ravg = sum(all_durations) / len(all_durations)
-            rmax = max(all_durations)
-            rmdev = stdev(all_durations) if len(all_durations) >= 2 else rmax
-            print(
-                f"rtt min/avg/max/mdev = {rmin:.3f}/{ravg:.3f}/{rmax:.3f}/{rmdev:.3f} ms"
+        if args.both and args.relay1 != args.relay2:
+            # Same profiles, roles swapped: the first receiver sends from relay2 to the sender
+            # on relay1, so no further profiles are set up for the way back
+            result["directions"].append(
+                ping_direction(args, receivers[0], [sender], args.relay2, args.relay1)
             )
+        elif args.both:
+            print("# --both: relay1 and relay2 are the same, one direction covers it")
 
         # Print timing and rate statistics
         print("--- timing statistics ---")
         print(f"account setup: {format_duration(account_setup_time)}")
-        print(f"message send/recv: {format_duration(message_time)}")
-
-        # Calculate message rates
-        if message_time > 0 and pinger.sent > 0:
-            send_rate = pinger.sent / message_time
-            print(f"send rate: {send_rate:.2f} msg/s")
-        if message_time > 0 and pinger.received > 0:
-            recv_rate = pinger.received / message_time
-            print(f"recv rate: {recv_rate:.2f} msg/s")
+        for direction in result["directions"]:
+            label = f" {direction['from']} -> {direction['to']}" if len(result["directions"]) > 1 else ""
+            message_time = direction["message_s"]
+            print(f"message send/recv{label}: {format_duration(message_time)}")
+            # Calculate message rates
+            if message_time > 0 and direction["sent"] > 0:
+                print(f"send rate{label}: {direction['sent'] / message_time:.2f} msg/s")
+            if message_time > 0 and direction["received"] > 0:
+                print(f"recv rate{label}: {direction['received'] / message_time:.2f} msg/s")
 
         # A profile with further relays did not only measure the given relays
         # (ported from upstream cmping 1ec230e)
@@ -940,9 +931,122 @@ def perform_ping(args):
             with contextlib.suppress(Exception):
                 addrs = [t["addr"] for t in account.list_transports()]
                 if len(addrs) > 1:
-                    print(f"✗ ERROR: profile uses multiple relays: {', '.join(addrs)}")
+                    warning = f"profile uses multiple relays: {', '.join(addrs)}"
+                    result["warnings"].append(warning)
+                    print(f"✗ ERROR: {warning}")
 
-        return pinger
+        return result
+
+
+def ping_direction(args, sender, receivers, relay_from, relay_to):
+    """Ping from `sender` to `receivers` through a new group and print the per-message lines
+    and the statistics block. Returns the direction's result for --json.
+
+    Timing: the duration of this function is the direction's "message_s".
+    """
+    group = create_group(sender, receivers, verbose=args.verbose)
+
+    # Phase 2: Message Ping/Pong (timed)
+    message_start = time.time()
+
+    pinger = Pinger(args, sender, group, receivers)
+    received = {}
+    # Track current sequence for output formatting
+    current_seq = None
+    # Track timing for each sequence: {seq: {'count': N, 'first_time': ms, 'last_time': ms, 'size': bytes}}
+    seq_tracking = {}
+    try:
+        for seq, ms_duration, size, receiver_idx in pinger.receive():
+            if seq not in received:
+                received[seq] = []
+            received[seq].append(ms_duration)
+
+            # Track timing for this sequence
+            if seq not in seq_tracking:
+                seq_tracking[seq] = {
+                    "count": 0,
+                    "first_time": ms_duration,
+                    "last_time": ms_duration,
+                    "size": size,
+                }
+            seq_tracking[seq]["count"] += 1
+            seq_tracking[seq]["last_time"] = ms_duration
+
+            # Print new line for new sequence or first message
+            if current_seq != seq:
+                if current_seq is not None:
+                    print()  # End previous line
+                # Start new line for this sequence
+                print(
+                    f"{size} bytes ME -> {pinger.relay1} -> {pinger.relay2} -> ME seq={seq} time={ms_duration:0.2f}ms",
+                    end="",
+                    flush=True,
+                )
+                current_seq = seq
+
+            # Print N/M ratio with in-place update (spinning effect)
+            count = seq_tracking[seq]["count"]
+            total = len(receivers)
+            # Calculate how many characters we need to overwrite from previous ratio
+            if count > 1:
+                # Backspace over previous ratio to update in-place
+                prev_count = count - 1
+                prev_ratio_len = len(f" {prev_count}/{total}")
+                print("\b" * prev_ratio_len, end="", flush=True)
+            print(f" {count}/{total}", end="", flush=True)
+
+            # If all receivers have received, print elapsed time
+            if count == total:
+                first_time = seq_tracking[seq]["first_time"]
+                last_time = seq_tracking[seq]["last_time"]
+                elapsed = last_time - first_time
+                print(f" (elapsed: {elapsed:0.2f}ms)", end="", flush=True)
+
+    except KeyboardInterrupt:
+        pass
+    finally:
+        pinger.stop()
+
+    message_time = time.time() - message_start
+
+    if current_seq is not None:
+        print()  # End last line
+
+    # Print statistics - show full addresses only in verbose >= 2
+    if args.verbose >= 2:
+        receivers_info = pinger.receivers_addrs_str
+    else:
+        receivers_info = f"{len(pinger.receivers_addrs)} receivers"
+    print(f"--- {pinger.addr1} -> {receivers_info} statistics ---")
+    print(
+        f"{pinger.sent} transmitted, {pinger.received} received, {pinger.loss:.2f}% loss"
+    )
+    delivery = None
+    if received:
+        all_durations = [d for durations in received.values() for d in durations]
+        rmin = min(all_durations)
+        ravg = sum(all_durations) / len(all_durations)
+        rmax = max(all_durations)
+        rmdev = stdev(all_durations) if len(all_durations) >= 2 else rmax
+        # "rtt" is ping's name for it; the time is from sending to receipt (see README)
+        print(
+            f"rtt min/avg/max/mdev = {rmin:.3f}/{ravg:.3f}/{rmax:.3f}/{rmdev:.3f} ms"
+        )
+        delivery = {k: round(v, 3) for k, v in
+                    (("min", rmin), ("avg", ravg), ("max", rmax), ("mdev", rmdev))}
+
+    return {
+        "from": relay_from,
+        "to": relay_to,
+        "sender": pinger.addr1,
+        "receivers": pinger.receivers_addrs,
+        "sent": pinger.sent,
+        "received": pinger.received,
+        "expected": args.count * len(receivers),
+        "loss_pct": round(pinger.loss, 2),
+        "delivery_ms": delivery,
+        "message_s": round(message_time, 3),
+    }
 
 
 class Pinger:
@@ -954,6 +1058,9 @@ class Pinger:
     3. Messages are sent to a group chat (single send, multiple receivers)
     4. receive() yields (seq, duration, size, receiver_idx) for each received message
     5. Multiple receivers may receive each sequence number
+    6. receive() ends when every ping arrived, or `args.grace` seconds after the last
+       one was sent; stop() ends the receiver threads, so a second Pinger (--both)
+       can use the same profiles
 
     Attributes:
         sent: Number of messages sent
@@ -985,15 +1092,22 @@ class Pinger:
         )
         ALPHANUMERIC = string.ascii_lowercase + string.digits
         self.tx = "".join(random.choices(ALPHANUMERIC, k=30))
-        t = threading.Thread(target=self.send_pings, daemon=True)
         self.sent = 0
         self.received = 0
+        # Set when every ping is sent; receive() waits `args.grace` seconds more
+        self.sending_done_at = None
+        self._stop = threading.Event()
+        t = threading.Thread(target=self.send_pings, daemon=True)
         t.start()
 
     @property
     def loss(self):
         expected_total = self.sent * len(self.receivers)
         return 0.0 if expected_total == 0 else (1 - self.received / expected_total) * 100
+
+    def stop(self):
+        """Stop sending and end the receiver threads."""
+        self._stop.set()
 
     def send_pings(self):
         """Send ping messages to the group at regular intervals.
@@ -1002,13 +1116,15 @@ class Pinger:
         Flow: Sender -> SMTP relay1 -> IMAP relay2 -> All receivers
         """
         for seq in range(self.args.count):
+            if self._stop.is_set():
+                break
             text = f"{self.tx} {time.time():.4f} {seq:17}"
             self.group.send_text(text)
             self.sent += 1
             time.sleep(self.args.interval)
-        # we sent all pings, let's wait a bit, then force quit if main didn't finish
-        time.sleep(60)
-        os.kill(os.getpid(), signal.SIGINT)
+        # The receiver gives up `grace` seconds from now. This used to SIGINT the whole
+        # process after 60 s, which would also have ended a second direction (--both).
+        self.sending_done_at = time.time()
 
     def receive(self):
         """Receive ping messages from all receivers.
@@ -1016,7 +1132,7 @@ class Pinger:
         Yields:
             tuple: (seq, ms_duration, size, receiver_idx) for each received message
                 - seq: Sequence number of the message
-                - ms_duration: Round-trip time in milliseconds
+                - ms_duration: Time from sending to receipt in milliseconds
                 - size: Size of the message in bytes
                 - receiver_idx: Index of the receiver that received the message
         """
@@ -1030,14 +1146,18 @@ class Pinger:
 
         def receiver_thread(receiver_idx, receiver):
             """Thread function to listen to events from a single receiver."""
-            while True:
+            # The account's own event queue with a timeout, so the thread ends on stop()
+            events = receiver._rpc.get_queue(receiver.id)
+            while not self._stop.is_set():
                 try:
-                    event = receiver.wait_for_event()
-                    event_queue.put((receiver_idx, receiver, event))
+                    event = AttrDict(events.get(timeout=0.5))
+                except Empty:
+                    continue
                 except Exception:
                     # If there's an error, put it in the queue
                     event_queue.put((receiver_idx, receiver, None))
                     break
+                event_queue.put((receiver_idx, receiver, event))
 
         # Start a thread for each receiver
         threads = []
@@ -1049,6 +1169,9 @@ class Pinger:
             threads.append(t)
 
         while num_pending > 0:
+            done_at = self.sending_done_at
+            if done_at is not None and time.time() - done_at > self.args.grace:
+                break
             try:
                 receiver_idx, receiver, event = event_queue.get(timeout=1.0)
                 if event is None:

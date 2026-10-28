@@ -1,6 +1,26 @@
 
 # cmping changelog 
 
+## 0.19.0
+
+### Features
+
+- `-b`/`--both`: also ping from relay2 back to relay1, with the same profiles (the first receiver sends to the sender), so one run times both directions.
+- `--json`: print one JSON result object on stdout: relays, `ok`, `error`, account setup time and per direction sent/received/expected, loss, `delivery_ms` (min/avg/max/mdev) and duration. The usual output goes to stderr.
+- `--grace`: seconds to wait for missing pings after the last one is sent (default 60, as before).
+- `--version`.
+
+### Bug Fixes
+
+- Waiting for missing pings ended by sending SIGINT to the whole process 60 s after the last ping; it now ends `receive()` after `--grace` seconds, and receiver threads stop when a direction is done.
+- `-l`/`--login-length` was parsed but not used; it now sets the length of logins cmping generates itself (IP relays). A domain relay picks its own logins, which the README wrongly showed `-l` changing.
+- Setup failures raise `CmpingError` instead of calling `sys.exit()` inside library functions, so `--json` can report them.
+
+### Documentation
+
+- README rewritten in the style of cmcall: what is measured (one-way delivery time, one clock), reading the numbers, all options, JSON, test profiles. Install instructions point to this fork; `pip install cmping` installs upstream.
+- The module docstring is the `--help` description.
+
 ## 0.17.6
 
 Ported from upstream chatmail/cmping.

@@ -386,5 +386,103 @@ class TestAccountCreationHardening(unittest.TestCase):
         maker.remove_unconfigured_accounts.assert_not_called()
 
 
+
+def _direction(sent=2, received=2, expected=2):
+    return {"from": "a.example", "to": "b.example", "sender": "s@a.example",
+            "receivers": ["r@b.example"], "sent": sent, "received": received,
+            "expected": expected, "loss_pct": 0.0, "delivery_ms": None, "message_s": 1.0}
+
+
+class TestMainJson(unittest.TestCase):
+    def _run(self, argv, perform):
+        out = __import__("io").StringIO()
+        with patch.object(sys, "argv", ["cmping", *argv]), \
+                patch("cmping.perform_ping", side_effect=perform), \
+                patch("sys.stdout", out), patch("sys.stderr", __import__("io").StringIO()):
+            with self.assertRaises(SystemExit) as ctx:
+                cmping.main()
+        return ctx.exception.code, out.getvalue()
+
+    def test_json_ok(self):
+        result = {"account_setup_s": 0.5, "directions": [_direction()], "warnings": []}
+        code, out = self._run(["-c", "2", "--json", "a.example", "b.example"], lambda args: result)
+        data = json.loads(out)  # stdout holds only the JSON object
+        self.assertEqual(code, 0)
+        self.assertTrue(data["ok"])
+        self.assertIsNone(data["error"])
+        self.assertEqual((data["relay1"], data["relay2"], data["count"]), ("a.example", "b.example", 2))
+
+    def test_json_loss_is_not_ok(self):
+        result = {"account_setup_s": 0.5, "directions": [_direction(), _direction(received=1)], "warnings": []}
+        code, out = self._run(["-c", "2", "--json", "a.example", "b.example"], lambda args: result)
+        self.assertEqual(code, 1)
+        self.assertFalse(json.loads(out)["ok"])
+
+    def test_json_setup_error(self):
+        def fail(args):
+            raise cmping.CmpingError("Timeout or error waiting for profiles to be online: x@b.example not online after 30s")
+        code, out = self._run(["--json", "a.example", "b.example"], fail)
+        data = json.loads(out)
+        self.assertEqual(code, 1)
+        self.assertFalse(data["ok"])
+        self.assertIn("not online after 30s", data["error"])
+        self.assertEqual(data["directions"], [])
+
+    def test_text_mode_prints_error_line(self):
+        def fail(args):
+            raise cmping.CmpingError("Failed to setup sender profile on a.example: boom")
+        code, out = self._run(["a.example"], fail)
+        self.assertEqual(code, 1)
+        self.assertIn("✗ Failed to setup sender profile on a.example: boom", out)
+
+
+class TestPinger(unittest.TestCase):
+    def _accounts(self):
+        sender = MagicMock()
+        sender.self_contact.get_snapshot.return_value.address = "s@a.example"
+        receiver = MagicMock()
+        receiver.id = 2
+        receiver.self_contact.get_snapshot.return_value.address = "r@b.example"
+        events = queue.Queue()
+        receiver._rpc.get_queue.return_value = events
+        return sender, receiver, events
+
+    def _args(self, **kw):
+        args = MagicMock(count=1, interval=0, grace=0.3, verbose=0)
+        for k, v in kw.items():
+            setattr(args, k, v)
+        return args
+
+    def test_gives_up_after_grace_instead_of_sigint(self):
+        sender, receiver, _events = self._accounts()
+        with patch("sys.stdout", __import__("io").StringIO()):
+            pinger = cmping.Pinger(self._args(), sender, MagicMock(), [receiver])
+            self.assertEqual(list(pinger.receive()), [])
+        pinger.stop()
+        self.assertEqual((pinger.sent, pinger.received), (1, 0))
+        self.assertEqual(pinger.loss, 100.0)
+
+    def test_counts_its_own_ping(self):
+        sender, receiver, events = self._accounts()
+        with patch("sys.stdout", __import__("io").StringIO()):
+            pinger = cmping.Pinger(self._args(grace=5), sender, MagicMock(), [receiver])
+            sent_at = __import__("time").time()
+            receiver.get_message_by_id.return_value.get_snapshot.return_value.text = (
+                f"{pinger.tx} {sent_at:.4f} {0:17}")
+            events.put({"kind": cmping.EventType.INCOMING_MSG, "msg_id": 5})
+            got = list(pinger.receive())
+        pinger.stop()
+        self.assertEqual([(seq, idx) for seq, _ms, _size, idx in got], [(0, 0)])
+        self.assertEqual(pinger.received, 1)
+
+
+class TestLoginLength(unittest.TestCase):
+    def test_generated_ip_login_length(self):
+        username, _ = cmping.generate_credentials(12)
+        self.assertEqual(len(username), 12)
+        qr = cmping.create_qr_url("127.0.0.1", login_length=7)
+        self.assertRegex(qr, r"^dclogin:[a-z0-9]{7}@\[127\.0\.0\.1\]/")
+
+
 if __name__ == "__main__":
     unittest.main()
