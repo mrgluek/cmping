@@ -1,6 +1,19 @@
 
 # cmping changelog 
 
+## 0.17.6
+
+Ported from upstream chatmail/cmping.
+
+### Bug Fixes
+
+- Give up waiting for profiles to come online after a timeout, new option `-w` (default 60 s). Waiting had no limit, so a relay that never let a profile in hung the run until the caller killed it; now cmping exits with "<address> not online after <N>s" (upstream a63e5be).
+- dclogin links for IP relays put the IP in square brackets (`user@[1.2.3.4]`) and name the servers with `ih`/`sh`; generated logins are 9 characters, chatmail's default (upstream cdff9b8).
+
+### Features
+
+- Report a profile that uses more than one relay, as it did not only measure the given relays (upstream 1ec230e).
+
 ## 0.17.5
 
 ### Bug Fixes

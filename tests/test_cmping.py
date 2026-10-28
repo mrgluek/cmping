@@ -1,3 +1,4 @@
+import queue
 import unittest
 from unittest.mock import MagicMock, patch, ANY
 import urllib.parse
@@ -22,7 +23,7 @@ class TestCmping(unittest.TestCase):
 
     def test_generate_credentials(self):
         username, password = cmping.generate_credentials()
-        self.assertEqual(len(username), 12)
+        self.assertEqual(len(username), 9)  # chatmail's default login length
         self.assertEqual(len(password), 20)
         self.assertTrue(all(c in (cmping.string.ascii_lowercase + cmping.string.digits) for c in username))
         self.assertTrue(all(c in (cmping.string.ascii_lowercase + cmping.string.digits) for c in password))
@@ -40,9 +41,11 @@ class TestCmping(unittest.TestCase):
         ip = "127.0.0.1"
         qr = cmping.create_qr_url(ip)
         self.assertTrue(qr.startswith("dclogin:"))
-        self.assertIn("@127.0.0.1/?", qr)
+        # An IP domain needs square brackets; servers are given explicitly
+        self.assertIn("@[127.0.0.1]/?", qr)
+        self.assertIn("&ih=127.0.0.1&sh=127.0.0.1&", qr)
         self.assertIn("p=", qr)
-        self.assertIn("v=1&ip=993&sp=465&ic=3&ss=default", qr)
+        self.assertIn("&ip=993&sp=465&ic=3&ss=default", qr)
 
     def test_format_duration(self):
         self.assertEqual(cmping.format_duration(1.5), "1.50s")
@@ -171,44 +174,52 @@ class TestCmping(unittest.TestCase):
         mock_clean_account.set_config_from_qr.assert_called_with(expected_dclogin)
         mock_clean_account.start_io.assert_called_once()
 
-    def test_wait_all_online_success(self):
+    def _online_maker(self, *events):
+        """AccountMaker with one online account whose event queue holds `events`."""
+        events_queue = queue.Queue()
+        for ev in events:
+            events_queue.put(ev)
         mock_dc = MagicMock()
+        mock_dc.rpc.get_queue.return_value = events_queue
         mock_account = MagicMock()
-        
-        # Mock wait_for_event to return IMAP_INBOX_IDLE event
-        mock_event = MagicMock()
-        mock_event.kind = cmping.EventType.IMAP_INBOX_IDLE
-        mock_account.wait_for_event.return_value = mock_event
-        mock_account.get_config.return_value = "test@domain.com"
-        
+        mock_account.id = 7
+        mock_account.self_contact.get_snapshot.return_value.address = "test@domain.com"
         maker = cmping.AccountMaker(mock_dc, verbose=0)
         maker.online = [mock_account]
-        
+        return maker
+
+    def test_wait_all_online_success(self):
+        maker = self._online_maker({"kind": cmping.EventType.IMAP_INBOX_IDLE})
         # Should complete without throwing exception
-        maker.wait_all_online()
-        mock_account.wait_for_event.assert_called_once()
+        maker.wait_all_online(timeout=1)
+        maker.dc.rpc.get_queue.assert_called_once_with(7)
+
+    def test_wait_all_online_skips_other_events(self):
+        maker = self._online_maker({"kind": "Info", "msg": "connecting"},
+                                   {"kind": cmping.EventType.IMAP_INBOX_IDLE})
+        maker.wait_all_online(timeout=1)
 
     def test_wait_all_online_error_raises_exception(self):
-        mock_dc = MagicMock()
-        mock_account = MagicMock()
-        
-        # Mock wait_for_event to return ERROR event
-        mock_event = MagicMock()
-        mock_event.kind = cmping.EventType.ERROR
-        mock_event.msg = "Connection timed out"
-        mock_account.wait_for_event.return_value = mock_event
-        mock_account.get_config.return_value = "test@domain.com"
-        
-        maker = cmping.AccountMaker(mock_dc, verbose=0)
-        maker.online = [mock_account]
-        
-        # Should raise an Exception
+        maker = self._online_maker({"kind": cmping.EventType.ERROR, "msg": "Connection timed out"})
         with self.assertRaises(Exception) as context:
-            maker.wait_all_online()
-            
+            maker.wait_all_online(timeout=1)
         self.assertIn("Profile setup error: Connection timed out", str(context.exception))
-        mock_account.wait_for_event.assert_called_once()
 
+    def test_wait_all_online_times_out(self):
+        # Nothing arrives: fail naming the profile instead of waiting forever
+        maker = self._online_maker()
+        with self.assertRaises(TimeoutError) as context:
+            maker.wait_all_online(timeout=0.2)
+        self.assertEqual(str(context.exception), "test@domain.com not online after 0.2s")
+
+    def test_ip_relay_profile_is_reused(self):
+        mock_account = MagicMock()
+        mock_account.self_contact.get_snapshot.return_value.address = "abc@[1.2.3.4]"
+        mock_dc = MagicMock()
+        mock_dc.get_all_accounts.return_value = [mock_account]
+        maker = cmping.AccountMaker(mock_dc, verbose=0)
+        self.assertIs(maker.get_relay_account("1.2.3.4"), mock_account)
+        mock_dc.add_account.assert_not_called()
 
 
 class TestDeleteOldChats(unittest.TestCase):

@@ -38,7 +38,7 @@ import urllib.request
 from dataclasses import dataclass
 from statistics import stdev
 
-from deltachat_rpc_client import DeltaChat, EventType, Rpc
+from deltachat_rpc_client import AttrDict, DeltaChat, EventType, Rpc
 from xdg_base_dirs import xdg_cache_home
 
 # Spinner characters for progress display
@@ -87,10 +87,10 @@ def generate_credentials():
     """Generate random username and password for IP-based login.
 
     Returns:
-        tuple: (username, password) where username is 12 chars and password is 20 chars
+        tuple: (username, password) where username is 9 chars (chatmail's default login length) and password is 20 chars
     """
     chars = string.ascii_lowercase + string.digits
-    username = "".join(random.choices(chars, k=12))
+    username = "".join(random.choices(chars, k=9))
     password = "".join(random.choices(chars, k=20))
     return username, password
 
@@ -102,7 +102,7 @@ def create_qr_url(domain_or_ip):
         domain_or_ip: Either a domain name, IP address, or HTTPS URL endpoint
 
     Returns:
-        str: Either dcaccount:domain, dclogin:username@ip/?p=..., or dcaccount:https://...
+        str: Either dcaccount:domain, dclogin:username@[ip]/?p=..., or dcaccount:https://...
     """
     # Check if domain_or_ip is an HTTPS URL endpoint (for mailadm-style API)
     if domain_or_ip.startswith("https://"):
@@ -112,14 +112,12 @@ def create_qr_url(domain_or_ip):
         # Generate credentials for IP address
         username, password = generate_credentials()
 
-        # Build dclogin URL according to spec
-        # dclogin:username@ip/?p=password&v=1&ip=993&sp=465&ic=3&ss=default
+        # An address with an IP domain needs square brackets (user@[1.2.3.4]); the servers are
+        # given explicitly as ih/sh (ported from upstream cmping cdff9b8)
         encoded_password = urllib.parse.quote(password, safe="")
-
-        # Format: dclogin:username@host/?query
         qr_url = (
-            f"dclogin:{username}@{domain_or_ip}/?"
-            f"p={encoded_password}&v=1&ip=993&sp=465&ic=3&ss=default"
+            f"dclogin:{username}@[{domain_or_ip}]/?"
+            f"p={encoded_password}&v=1&ih={domain_or_ip}&sh={domain_or_ip}&ip=993&sp=465&ic=3&ss=default"
         )
         return qr_url
     else:
@@ -282,6 +280,13 @@ def main():
         default=9,
         help="length of login/username before @server.tld (default 9)",
     )
+    parser.add_argument(
+        "-w",
+        dest="timeout",
+        type=float,
+        default=60,
+        help="seconds to wait for profiles to come online (default 60)",
+    )
     args = parser.parse_args()
     if not args.relay2:
         args.relay2 = args.relay1
@@ -391,12 +396,22 @@ class AccountMaker:
             else:
                 print(f"  {event.kind} [{addr}]")
 
-    def wait_all_online(self):
-        remaining = list(self.online)
-        while remaining:
-            ac = remaining.pop()
+    def wait_all_online(self, timeout=60):
+        """Wait until every started account is idle on IMAP.
+
+        Raises TimeoutError when they are not all idle `timeout` seconds from
+        now, naming the account, instead of waiting forever for a relay that
+        never lets the profile in (ported from upstream cmping a63e5be).
+        """
+        deadline = time.time() + timeout
+        for ac in self.online:
+            # Account.wait_for_event() cannot time out; the queue behind it can.
+            events = self.dc.rpc.get_queue(ac.id)
             while True:
-                event = ac.wait_for_event()
+                try:
+                    event = AttrDict(events.get(timeout=max(0.0, deadline - time.time())))
+                except Empty:
+                    raise TimeoutError(f"{self_addr(ac)} not online after {timeout:g}s") from None
                 if event.kind == EventType.IMAP_INBOX_IDLE:
                     if self.verbose >= 3:
                         addr = self_addr(ac)
@@ -469,7 +484,7 @@ class AccountMaker:
                             if self.verbose >= 3:
                                 print(f"  Reusing existing account: {addr}")
                             break
-                elif addr_domain == domain:
+                elif addr_domain == (f"[{domain}]" if is_ip_address(domain) else domain):
                     if account not in self.online:
                         if self.verbose >= 3:
                             print(f"  Reusing existing account: {addr}")
@@ -669,11 +684,12 @@ def create_group(sender, receivers, verbose=0):
     return group
 
 
-def wait_profiles_online(maker):
+def wait_profiles_online(maker, timeout=60):
     """Wait for all profiles to be online with spinner progress.
 
     Args:
         maker: AccountMaker instance with accounts to wait for
+        timeout: Seconds after which waiting fails
 
     Raises:
         SystemExit: If waiting for profiles fails
@@ -685,7 +701,7 @@ def wait_profiles_online(maker):
     def wait_online_thread():
         nonlocal online_error
         try:
-            maker.wait_all_online()
+            maker.wait_all_online(timeout)
         except Exception as e:
             online_error = e
         finally:
@@ -711,11 +727,12 @@ def wait_profiles_online(maker):
     print_progress("Waiting for profiles to be online", done=True)
 
 
-def wait_profiles_online_multi(makers):
+def wait_profiles_online_multi(makers, timeout=60):
     """Wait for all profiles to be online with spinner progress.
 
     Args:
         makers: List of AccountMaker instances with accounts to wait for
+        timeout: Seconds after which waiting fails
 
     Raises:
         SystemExit: If waiting for profiles fails
@@ -724,7 +741,7 @@ def wait_profiles_online_multi(makers):
 
     def wait_online_thread(maker):
         try:
-            maker.wait_all_online()
+            maker.wait_all_online(timeout)
         except Exception as e:
             online_errors.append(e)
 
@@ -812,7 +829,7 @@ def perform_ping(args):
         # Wait for all accounts to be online with timeout feedback
         # Combine all makers for waiting
         all_makers = [relay_contexts[r].maker for r in relays]
-        wait_profiles_online_multi(all_makers)
+        wait_profiles_online_multi(all_makers, args.timeout)
 
         account_setup_time = time.time() - account_setup_start
 
@@ -916,6 +933,14 @@ def perform_ping(args):
         if message_time > 0 and pinger.received > 0:
             recv_rate = pinger.received / message_time
             print(f"recv rate: {recv_rate:.2f} msg/s")
+
+        # A profile with further relays did not only measure the given relays
+        # (ported from upstream cmping 1ec230e)
+        for account in [sender, *receivers]:
+            with contextlib.suppress(Exception):
+                addrs = [t["addr"] for t in account.list_transports()]
+                if len(addrs) > 1:
+                    print(f"✗ ERROR: profile uses multiple relays: {', '.join(addrs)}")
 
         return pinger
 
